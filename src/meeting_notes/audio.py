@@ -173,13 +173,14 @@ def load_audio_file(path: str) -> tuple[np.ndarray, int]:
 
         return audio, sample_rate
 
-    # For other formats, let Whisper's load_audio handle it (requires ffmpeg)
+    # For other formats, let faster-whisper's PyAV-backed decoder handle it.
     try:
-        import whisper  # noqa: PLC0415
-        audio = whisper.load_audio(path)
+        from faster_whisper.audio import decode_audio  # noqa: PLC0415
+
+        audio = decode_audio(path, sampling_rate=DEFAULT_SAMPLE_RATE)
         return audio, DEFAULT_SAMPLE_RATE
     except ImportError as exc:
         raise RuntimeError(
-            "openai-whisper is required to load non-WAV audio files. "
-            "Install it with: pip install openai-whisper"
+            "faster-whisper is required to load non-WAV audio files. "
+            "Install it with: pip install faster-whisper"
         ) from exc

@@ -14,9 +14,12 @@ Two backends are supported, both fully offline:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +32,10 @@ class MeetingNotes:
     action_items: list[str] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
     language: str = "en"
+    #: Drugs, conditions and procedures the model flagged. Only the
+    #: consultation template asks for these; the clients merge in their own
+    #: lexicon matches on top.
+    medical_terms: list[str] = field(default_factory=list)
 
     def to_markdown(self, transcript: Optional[str] = None, date_str: Optional[str] = None) -> str:
         """Render the notes as a Markdown string."""
@@ -98,30 +105,45 @@ class Summarizer:
         self.use_ollama = use_ollama
         self.ollama_url = ollama_url.rstrip("/")
         self.ollama_model = ollama_model
+        self._resolved_model: Optional[str] = None
 
-    def summarize(self, transcript: str, language: str = "en") -> MeetingNotes:
-        """Generate structured meeting notes from *transcript*.
+    def summarize(
+        self,
+        transcript: str,
+        language: str = "en",
+        template: str = "meeting",
+    ) -> MeetingNotes:
+        """Generate structured notes from *transcript*.
 
         Tries Ollama first; falls back to extractive summarization if Ollama
         is unavailable or returns an error.
 
         Args:
-            transcript: Full plain-text transcript of the meeting.
+            transcript: Full plain-text transcript.
             language: Detected language code (e.g. ``"tl"`` for Filipino).
+            template: ``"meeting"`` for generic notes, or ``"consultation"``
+                for a clinical chief-complaint / history / assessment / plan
+                structure. See :data:`TEMPLATES`.
 
         Returns:
             :class:`MeetingNotes` instance.
         """
+        if template not in TEMPLATES:
+            raise ValueError(
+                f"Invalid template '{template}'. "
+                f"Choose from: {', '.join(TEMPLATES)}"
+            )
+
         if not transcript.strip():
             return MeetingNotes(
-                title="Meeting Notes",
+                title=TEMPLATES[template]["empty_title"],
                 summary="(No transcript content to summarize.)",
                 language=language,
             )
 
         if self.use_ollama:
             try:
-                return self._summarize_ollama(transcript, language)
+                return self._summarize_ollama(transcript, language, template)
             except Exception:  # noqa: BLE001
                 pass  # Fall through to extractive
 
@@ -131,15 +153,64 @@ class Summarizer:
     # Ollama backend
     # ------------------------------------------------------------------
 
-    def _summarize_ollama(self, transcript: str, language: str) -> MeetingNotes:
+    def resolve_model(self) -> str:
+        """Pick a model Ollama actually has, preferring the configured one.
+
+        Ollama matches names exactly, so a configured ``llama3`` against an
+        installed ``llama3.2:latest`` returns 404 — and because an Ollama
+        failure silently falls back to the extractive summarizer, the only
+        symptom is notes that are quietly much worse. Rather than pin a name
+        that has to be right on every machine, ask what is installed.
+
+        Resolution order: exact name, then name ignoring the ``:tag``, then
+        whatever is installed. Falls back to the configured name when the
+        catalogue cannot be read, so the caller's error handling still runs.
+        """
+        if self._resolved_model is not None:
+            return self._resolved_model
+
+        configured = self.ollama_model
+        try:
+            import requests  # noqa: PLC0415
+
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            response.raise_for_status()
+            available = [
+                m["name"] for m in response.json().get("models", []) if m.get("name")
+            ]
+        except Exception:  # noqa: BLE001
+            return configured
+
+        if not available:
+            return configured
+
+        chosen = _match_model(configured, available)
+        if chosen != configured:
+            logger.warning(
+                "Ollama model %r is not installed; using %r instead. "
+                "Installed: %s",
+                configured,
+                chosen,
+                ", ".join(available),
+            )
+
+        self._resolved_model = chosen
+        return chosen
+
+    def _summarize_ollama(
+        self,
+        transcript: str,
+        language: str,
+        template: str = "meeting",
+    ) -> MeetingNotes:
         """Call a local Ollama LLM to produce structured notes."""
         import json
         import requests  # noqa: PLC0415
 
-        prompt = _build_prompt(transcript, language)
+        prompt = _build_prompt(transcript, language, template)
 
         payload = {
-            "model": self.ollama_model,
+            "model": self.resolve_model(),
             "prompt": prompt,
             "stream": False,
         }
@@ -215,22 +286,93 @@ class Summarizer:
 # ------------------------------------------------------------------
 
 
-def _build_prompt(transcript: str, language: str) -> str:
-    """Build the LLM prompt for structured meeting note generation."""
+#: Note templates. Both produce the same JSON fields — the desktop app, the
+#: document writers and the TS clients all depend on that shape — but they ask
+#: the model to fill them with different things.
+TEMPLATES: dict[str, dict] = {
+    "meeting": {
+        "label": "Meeting notes",
+        "empty_title": "Meeting Notes",
+        "role": "an expert meeting note taker",
+        "fields": (
+            '- "title": a short descriptive title for this meeting (string)\n'
+            '- "summary": a concise summary of the meeting (2-4 sentences, string)\n'
+            '- "key_topics": list of main topics discussed (list of strings)\n'
+            '- "decisions": list of decisions made during the meeting (list of strings)\n'
+            '- "action_items": list of action items or follow-ups (list of strings)'
+        ),
+        "guidance": "",
+        "source_label": "TRANSCRIPT",
+    },
+    "consultation": {
+        "label": "Clinical consultation",
+        "empty_title": "Consultation Notes",
+        "role": "an experienced clinical scribe documenting a doctor-patient consultation",
+        "fields": (
+            '- "title": chief complaint in a few words, e.g. "Chest pain, 3 days" (string)\n'
+            '- "summary": the history of present illness as clinical prose (3-6 sentences, string)\n'
+            '- "key_topics": findings — symptoms, vitals, examination results (list of strings)\n'
+            '- "decisions": assessment — diagnoses, clinical impressions (list of strings)\n'
+            '- "action_items": plan — medications with dosage, tests ordered, follow-up (list of strings)\n'
+            '- "medical_terms": drug names, conditions and procedures mentioned (list of strings)'
+        ),
+        # Two things this has to get right, and both are easy to get wrong:
+        # the record must be English because PH charts are, but flattening the
+        # patient's own words into clinical language loses information a
+        # clinician may need to re-read later.
+        "guidance": (
+            "\nRules:\n"
+            "- Write the notes in ENGLISH even when the consultation was in "
+            "Tagalog or mixed Tagalog-English. Philippine medical records are "
+            "kept in English.\n"
+            "- Preserve the patient's own words as a direct quote, in their "
+            "original language, wherever the exact phrasing carries clinical "
+            "meaning.\n"
+            "- Record only what was actually said. Never infer a diagnosis, "
+            "dosage or test result that is not in the transcript.\n"
+            "- Where something was unclear or inaudible, say so rather than "
+            "guessing.\n"
+        ),
+        "source_label": "CONSULTATION TRANSCRIPT",
+    },
+}
+
+#: Template names, for CLI choices and API validation.
+TEMPLATE_NAMES = tuple(TEMPLATES)
+
+
+def _match_model(configured: str, available: list[str]) -> str:
+    """Choose the best installed Ollama model for a configured name."""
+    if configured in available:
+        return configured
+
+    # "llama3.2" should match an installed "llama3.2:latest".
+    base = configured.split(":", 1)[0]
+    for name in available:
+        if name.split(":", 1)[0] == base:
+            return name
+
+    # Nothing close. Any working model beats silently degrading to extractive.
+    return available[0]
+
+
+def _build_prompt(
+    transcript: str,
+    language: str,
+    template: str = "meeting",
+) -> str:
+    """Build the LLM prompt for structured note generation."""
+    spec = TEMPLATES.get(template, TEMPLATES["meeting"])
     lang_hint = f" (transcript language code: {language})" if language != "en" else ""
 
-    return f"""You are an expert meeting note taker{lang_hint}.
+    return f"""You are {spec["role"]}{lang_hint}.
 
-Given the following meeting transcript, produce structured meeting notes in JSON format with these fields:
-- "title": a short descriptive title for this meeting (string)
-- "summary": a concise summary of the meeting (2-4 sentences, string)
-- "key_topics": list of main topics discussed (list of strings)
-- "decisions": list of decisions made during the meeting (list of strings)
-- "action_items": list of action items or follow-ups (list of strings)
-
+Given the following transcript, produce structured notes in JSON format with these fields:
+{spec["fields"]}
+{spec["guidance"]}
 Respond ONLY with valid JSON. No explanations outside the JSON.
 
-TRANSCRIPT:
+{spec["source_label"]}:
 {transcript[:4000]}
 
 JSON:"""
@@ -257,6 +399,7 @@ def _parse_llm_response(raw: str, language: str) -> MeetingNotes:
         key_topics=data.get("key_topics", []),
         decisions=data.get("decisions", []),
         action_items=data.get("action_items", []),
+        medical_terms=data.get("medical_terms", []),
         language=language,
     )
 

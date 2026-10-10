@@ -1,0 +1,30 @@
+# Terms that must not be lost — one per line, blank lines and # comments ignored.
+# Score with: meeting-notes bench --manifest ... --terms terms.txt
+#
+# Term recall counts only terms that actually appear in the reference, so an
+# over-long list costs nothing but does not help either. Keep it to what is
+# genuinely said in the audio.
+
+# --- Drugs ---
+amoxicillin
+paracetamol
+ibuprofen
+metformin
+losartan
+salbutamol
+
+# --- Conditions (English) ---
+chest pain
+headache
+hypertension
+asthma
+diabetes
+fever
+
+# --- Conditions (Tagalog) ---
+lagnat
+ubo
+sipon
+altapresyon
+hika
+pantal

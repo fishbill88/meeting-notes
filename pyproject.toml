@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = [
-    "openai-whisper>=20231117",
+    # CTranslate2 Whisper: same weights as openai-whisper, ~4x faster on CPU
+    # at int8 and about half the memory. See MODELS.md.
+    "faster-whisper>=1.1.0",
     "sounddevice>=0.4.6",
     "numpy>=1.24",
     "scipy>=1.11",
@@ -25,6 +27,37 @@ dev = [
     "pytest>=7.4",
     "pytest-mock>=3.12",
 ]
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
+# Everything the Tauri sidecar needs: the server plus at-rest encryption for
+# stored consultations, and sherpa-onnx for speaker diarization.
+desktop = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+    "cryptography>=42.0",
+    "sherpa-onnx>=1.10",
+]
+# Runtime for the Tagalog FastConformer engine (ONNX inference + VAD).
+tagalog = [
+    "sherpa-onnx>=1.10",
+]
+# One-time export of the NCSpeech .nemo checkpoint to ONNX. Pulls in PyTorch
+# and the NeMo toolkit — install it, run scripts/export_nemo_to_onnx.py, then
+# uninstall. Not needed at runtime.
+nemo = [
+    "nemo_toolkit[asr]>=2.0",
+    "huggingface_hub>=0.23",
+]
+# Public evaluation datasets (FLEURS, Common Voice). Local JSONL manifests
+# work without this.
+bench = [
+    "datasets>=2.19",
+    "soundfile>=0.12",
+]
 
 [project.scripts]
 meeting-notes = "meeting_notes.main:cli"
@@ -34,3 +67,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Run against the working tree, not whatever copy is in site-packages.
+pythonpath = ["src", "."]

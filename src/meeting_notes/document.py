@@ -77,9 +77,21 @@ def _write_docx(
     path: str,
     date_str: str,
 ) -> None:
+    _build_docx(notes, transcript, date_str).save(path)
+
+
+def _build_docx(
+    notes: MeetingNotes,
+    transcript: Optional[str],
+    date_str: str,
+):
+    """Build the Word document in memory.
+
+    Separate from :func:`_write_docx` so the desktop app can export bytes
+    straight to a native save dialog without a temp file on the way.
+    """
     try:
         from docx import Document  # noqa: PLC0415
-        from docx.shared import Pt, RGBColor  # noqa: PLC0415
     except ImportError as exc:
         raise RuntimeError(
             "python-docx is required to generate DOCX files. "
@@ -135,7 +147,87 @@ def _write_docx(
             if chunk.strip():
                 doc.add_paragraph(chunk.strip())
 
-    doc.save(path)
+    return doc
+
+
+# ------------------------------------------------------------------
+# In-memory rendering (desktop export)
+# ------------------------------------------------------------------
+
+
+#: Formats :func:`render_document` can produce, mapped to their MIME types.
+EXPORT_FORMATS = {
+    "markdown": "text/markdown",
+    "docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ),
+    "text": "text/plain",
+}
+
+
+def render_document(
+    notes: MeetingNotes,
+    transcript: Optional[str] = None,
+    output_format: str = "markdown",
+    date_str: Optional[str] = None,
+) -> bytes:
+    """Render notes to bytes without touching the filesystem.
+
+    The desktop app hands these straight to a native save dialog, so the
+    document never lands in a temp directory — which matters when the content
+    is a patient consultation.
+
+    Args:
+        notes: Structured notes.
+        transcript: Optional transcript to append.
+        output_format: One of :data:`EXPORT_FORMATS`.
+        date_str: Display date; defaults to now.
+
+    Returns:
+        Encoded document bytes.
+    """
+    if output_format not in EXPORT_FORMATS:
+        raise ValueError(
+            f"Invalid output_format '{output_format}'. "
+            f"Choose from: {', '.join(EXPORT_FORMATS)}"
+        )
+
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if output_format == "docx":
+        import io  # noqa: PLC0415
+
+        buffer = io.BytesIO()
+        _build_docx(notes, transcript, date_str).save(buffer)
+        return buffer.getvalue()
+
+    markdown = notes.to_markdown(transcript=transcript, date_str=date_str)
+    if output_format == "text":
+        return _strip_markdown(markdown).encode("utf-8")
+    return markdown.encode("utf-8")
+
+
+def suggested_filename(notes: MeetingNotes, output_format: str) -> str:
+    """A timestamped, filesystem-safe filename for an export."""
+    extension = {"markdown": "md", "docx": "docx", "text": "txt"}.get(
+        output_format, "md"
+    )
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{timestamp}_{_safe_filename(notes.title)}.{extension}"
+
+
+def _strip_markdown(text: str) -> str:
+    """Flatten Markdown for pasting into an EMR field that renders nothing."""
+    import re  # noqa: PLC0415
+
+    out = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)
+    out = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", out)
+    out = re.sub(r"^\s*[-*]\s+", "• ", out, flags=re.MULTILINE)
+    # Action items are written as task-list checkboxes. Rendered nowhere, they
+    # read as literal "[ ]" noise in a pasted chart entry.
+    out = re.sub(r"^(•\s*)\[[ xX]\]\s*", r"\1", out, flags=re.MULTILINE)
+    return out
 
 
 # ------------------------------------------------------------------

@@ -1,11 +1,6 @@
-"""Tests for the transcription module."""
+"""Tests for the transcription facade and shared result types."""
 
 from __future__ import annotations
-
-import os
-import tempfile
-import wave
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -29,6 +24,18 @@ def test_segment_str_format():
     assert "01:05" in result
     assert "01:10" in result
     assert "Hello world." in result
+
+
+def test_segment_defaults_to_english_and_no_confidence():
+    seg = TranscriptSegment(start=0.0, end=1.0, text="Hi")
+    assert seg.lang == "en"
+    assert seg.confidence is None
+
+
+def test_segment_carries_language_and_confidence():
+    seg = TranscriptSegment(0.0, 1.0, "Kumusta", lang="tl", confidence=0.82)
+    assert seg.lang == "tl"
+    assert seg.confidence == 0.82
 
 
 # ---------------------------------------------------------------------------
@@ -59,73 +66,42 @@ def test_timed_transcript_empty_segments():
     assert result.timed_transcript == ""
 
 
+def test_result_records_backend():
+    result = TranscriptionResult(
+        text="Hi", language="en", language_name="English", backend="faster-whisper"
+    )
+    assert result.backend == "faster-whisper"
+
+
 # ---------------------------------------------------------------------------
-# Transcriber – unit tests with mocked Whisper
+# Transcriber – now a thin facade over a backend
 # ---------------------------------------------------------------------------
 
 
-def _make_wav(path: str, n_frames: int = 8000) -> None:
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(16000)
-        wf.writeframes(b"\x00" * n_frames * 2)
+def test_transcribe_file_delegates_to_backend(fake_backend, wav_file):
+    t = Transcriber(model_size="base", backend=fake_backend)
+    result = t.transcribe_file(wav_file)
+
+    assert result.text == "This is a test transcript."
+    assert result.language == "en"
+    assert len(result.segments) == 1
+    assert fake_backend.calls == [("transcribe_file", wav_file)]
 
 
-FAKE_WHISPER_RESULT = {
-    "text": "This is a test transcript.",
-    "language": "en",
-    "segments": [
-        {"start": 0.0, "end": 2.5, "text": "This is a test"},
-        {"start": 2.5, "end": 4.0, "text": " transcript."},
-    ],
-}
+def test_transcribe_array_delegates_to_backend(fake_backend):
+    import numpy as np
+
+    t = Transcriber(backend=fake_backend)
+    t.transcribe_array(np.zeros(16000, dtype=np.float32), sample_rate=16000)
+
+    assert fake_backend.calls == [("transcribe_array", 16000)]
 
 
-@patch("whisper.load_model")
-def test_transcribe_file_success(mock_load_model):
-    mock_model = MagicMock()
-    mock_model.transcribe.return_value = FAKE_WHISPER_RESULT
-    mock_load_model.return_value = mock_model
+def test_transcribe_file_not_found(fake_backend):
+    from meeting_notes.backends.base import _require_file
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        path = f.name
-    try:
-        _make_wav(path)
-        t = Transcriber(model_size="base")
-        result = t.transcribe_file(path)
-
-        assert result.text == "This is a test transcript."
-        assert result.language == "en"
-        assert len(result.segments) == 2
-    finally:
-        os.unlink(path)
-
-
-@patch("whisper.load_model")
-def test_transcribe_file_with_language_hint(mock_load_model):
-    mock_model = MagicMock()
-    mock_model.transcribe.return_value = {**FAKE_WHISPER_RESULT, "language": "tl"}
-    mock_load_model.return_value = mock_model
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        path = f.name
-    try:
-        _make_wav(path)
-        t = Transcriber(model_size="base", language="tl")
-        result = t.transcribe_file(path)
-
-        call_kwargs = mock_model.transcribe.call_args[1]
-        assert call_kwargs.get("language") == "tl"
-        assert result.language == "tl"
-    finally:
-        os.unlink(path)
-
-
-def test_transcribe_file_not_found():
-    t = Transcriber(model_size="base")
     with pytest.raises(FileNotFoundError, match="Audio file not found"):
-        t.transcribe_file("/nonexistent/audio.wav")
+        _require_file("/nonexistent/audio.wav")
 
 
 def test_invalid_model_size_raises():
@@ -133,9 +109,14 @@ def test_invalid_model_size_raises():
         Transcriber(model_size="mega")
 
 
-def test_model_lazy_loaded():
+def test_backend_lazily_constructed():
     t = Transcriber(model_size="base")
-    assert t._model is None  # not loaded yet
+    assert t._backend is None  # not built until first use
+
+
+def test_large_v3_turbo_is_a_valid_model_size():
+    # The default English engine — guards against the choices list regressing.
+    Transcriber(model_size="large-v3-turbo")
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +135,7 @@ def test_language_name_unknown_returns_code():
 
 def test_resample_increases_length():
     import numpy as np
+
     audio = np.zeros(8000, dtype=np.float32)
     resampled = _resample(audio, orig_rate=8000, target_rate=16000)
     assert len(resampled) == 16000
@@ -161,6 +143,14 @@ def test_resample_increases_length():
 
 def test_resample_decreases_length():
     import numpy as np
+
     audio = np.zeros(16000, dtype=np.float32)
     resampled = _resample(audio, orig_rate=16000, target_rate=8000)
     assert len(resampled) == 8000
+
+
+def test_resample_noop_when_rates_match():
+    import numpy as np
+
+    audio = np.zeros(16000, dtype=np.float32)
+    assert _resample(audio, 16000, 16000) is audio

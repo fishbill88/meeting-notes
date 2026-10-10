@@ -1,0 +1,33 @@
+# Affixed hybrid forms appearing in the audio — one per line.
+#
+# These are the Taglish signature: a Tagalog affix on an English root, with the
+# root keeping its English spelling. An English-trained engine drops the prefix;
+# a Tagalog-trained one mis-segments the root. Neither is scored correctly by
+# overall WER alone, which is why these get their own list.
+#
+# Used in Phase 7 to score hybrid-form accuracy separately. Scoring them via
+# --terms works today, since the normaliser preserves word-internal hyphens and
+# treats `nag-meeting` as one token.
+
+# --- mag- / nag- (actor focus) ---
+nag-meeting
+nag-reklamo
+nag-blur
+mag-check
+nag-CT scan
+
+# --- i- / ipa- (object focus) ---
+i-submit
+i-refer
+i-prescribe
+i-check
+ipa-x-ray
+
+# --- na- / ma- (completed / ability) ---
+na-diagnose
+na-admit
+ma-discharge
+
+# --- reduplicated (progressive) ---
+magda-drive
+nagpa-checkup

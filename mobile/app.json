@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "Meeting Notes AI",
+    "slug": "meeting-notes-ai",
+    "scheme": "meetingnotes",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.meetingnotesai.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Meeting Notes AI needs microphone access to record meetings.",
+        "NSSpeechRecognitionUsageDescription": "Meeting Notes AI uses speech recognition to transcribe meetings."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundColor": "#1E3A5F"
+      },
+      "package": "com.meetingnotesai.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Meeting Notes AI needs microphone access to record meetings."
+        }
+      ],
+      "expo-asset",
+      "expo-font",
+      "expo-mail-composer"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "2c152a2b-941d-46f9-82e1-babf5b9a0f6f"
+      }
+    }
+  }
+}
