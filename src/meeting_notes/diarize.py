@@ -297,6 +297,22 @@ def _diarize(audio_path: str):
     it (resampled, denoised when possible), so the phrase re-check embeds
     exactly the same signal — or ``None`` on any failure.
     """
+    try:
+        from meeting_notes.audio import load_audio_file  # noqa: PLC0415
+
+        audio, sample_rate = load_audio_file(audio_path)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not read %s for diarization", audio_path)
+        return None
+    return _diarize_samples(audio, sample_rate, audio_path)
+
+
+def _diarize_samples(audio, sample_rate: int, label: str = "audio"):
+    """Diarize samples already in memory (mono float32). Same result shape as :func:`_diarize`.
+
+    This is what a CHUNK goes through: a long recording is decoded once and each part diarized from its
+    slice, with no temporary file per part.
+    """
     diarizer = _load_diarizer()
     if diarizer is None:
         return None
@@ -304,10 +320,8 @@ def _diarize(audio_path: str):
     try:
         import numpy as np  # noqa: PLC0415
 
-        from meeting_notes.audio import load_audio_file  # noqa: PLC0415
         from meeting_notes.backends.base import resample  # noqa: PLC0415
 
-        audio, sample_rate = load_audio_file(audio_path)
         audio = np.asarray(
             resample(audio, sample_rate, diarizer.sample_rate), dtype=np.float32
         )
@@ -332,7 +346,7 @@ def _diarize(audio_path: str):
         result = diarizer.process(audio)
         segments = result.sort_by_start_time()
     except Exception:  # noqa: BLE001
-        logger.exception("diarization failed for %s", audio_path)
+        logger.exception("diarization failed for %s", label)
         return None
 
     spans = [SpeakerSpan(start=s.start, end=s.end, speaker=s.speaker) for s in segments]
@@ -439,6 +453,36 @@ def _refine_clusters(
     return refined
 
 
+def _cluster_segments(
+    segments: list[TranscriptSegment],
+    spans: list[SpeakerSpan],
+    voices: Optional[list] = None,
+) -> list[int]:
+    """The diarizer's cluster id for each segment: the span it overlaps most (or, in a gap, the nearest),
+    then the short-phrase voice re-check. Shared by whole-recording labelling and per-chunk labelling."""
+    clusters: list[int] = []
+    for seg in segments:
+        best = spans[0].speaker
+        best_overlap = 0.0
+        best_dist = float("inf")
+        for span in spans:
+            overlap = min(span.end, seg.end) - max(span.start, seg.start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = span.speaker
+            elif best_overlap <= 0:
+                mid = (seg.start + seg.end) / 2
+                dist = max(span.start - mid, mid - span.end, 0.0)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = span.speaker
+        clusters.append(best)
+
+    if voices:
+        clusters = _refine_clusters(clusters, segments, voices)
+    return clusters
+
+
 def label_segments(
     segments: list[TranscriptSegment],
     spans: list[SpeakerSpan],
@@ -463,26 +507,7 @@ def label_segments(
     if not segments or not spans:
         return 0
 
-    clusters: list[int] = []
-    for seg in segments:
-        best = spans[0].speaker
-        best_overlap = 0.0
-        best_dist = float("inf")
-        for span in spans:
-            overlap = min(span.end, seg.end) - max(span.start, seg.start)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best = span.speaker
-            elif best_overlap <= 0:
-                mid = (seg.start + seg.end) / 2
-                dist = max(span.start - mid, mid - span.end, 0.0)
-                if dist < best_dist:
-                    best_dist = dist
-                    best = span.speaker
-        clusters.append(best)
-
-    if voices:
-        clusters = _refine_clusters(clusters, segments, voices)
+    clusters = _cluster_segments(segments, spans, voices)
 
     order: dict[int, int] = {}
     for cluster in clusters:
@@ -512,3 +537,174 @@ def assign_speakers(segments: list[TranscriptSegment], audio_path: str) -> int:
     voices = segment_voices(segments, audio, sample_rate)
     found = label_segments(segments, spans, voices)
     return found if found >= 2 else 0
+
+
+# ---------------------------------------------------------------------------
+# Long recordings: diarize a part, then tell which of its speakers are which across parts
+# ---------------------------------------------------------------------------
+#
+# A diarizer labels speakers WITHIN what it was given: "speaker 0" in part 3 is not "speaker 0" in part 1.
+# So each part is clustered on its own, every local speaker is summarised by a voice fingerprint (the mean of
+# the embeddings of their longer phrases, the same anchors the short-phrase re-check uses), and the
+# fingerprints are matched across parts by cosine similarity. Matching is greedy and in order, so the global
+# numbering is "by first appearance" exactly as for a short recording: Person 1 still speaks first.
+
+#: How alike two fingerprints must be to be the same person. Measured on the Recordings/ fixtures: phrases of
+#: two seconds or more score 0.70-0.96 against their own speaker, and the best wrong-speaker score on a short
+#: phrase was 0.51. A fingerprint averages several anchors so is steadier than a phrase; 0.55 sits above the
+#: wrong-speaker ceiling with margin, and below the same-speaker floor.
+LINK_THRESHOLD = 0.55
+
+
+@dataclass
+class ChunkSpeakers:
+    """One part's diarization: a local cluster id per segment, and each cluster's voice fingerprint."""
+
+    clusters: list[int]
+    #: local cluster id -> unit-length fingerprint, in order of first appearance. A cluster with no phrase
+    #: long enough to embed has no entry, and cannot be linked.
+    fingerprints: dict[int, "object"]
+    #: how many anchor phrases each fingerprint is built from (its weight when merged into a global one)
+    weights: dict[int, int]
+
+
+def diarize_chunk(
+    segments: list[TranscriptSegment],
+    audio,
+    sample_rate: int,
+) -> Optional[ChunkSpeakers]:
+    """Diarize one part of a long recording from its samples. ``segments`` are relative to the part.
+
+    ``None`` when diarization is unavailable or fails (the part is then left unlabelled; the transcript
+    matters more than the labels). Unlike :func:`assign_speakers` this never applies the monologue rule or
+    numbers anybody: a part with one speaker is still a speaker, and who "Person 1" is is decided across
+    all the parts by :class:`SpeakerLinker`.
+    """
+    if not segments:
+        return None
+    diarized = _diarize_samples(audio, sample_rate, "a part of a long recording")
+    if not diarized or not diarized[0]:
+        return None
+    spans, resampled, rate = diarized
+
+    voices = segment_voices(segments, resampled, rate)
+    clusters = _cluster_segments(segments, spans, voices)
+    if not voices:
+        return ChunkSpeakers(clusters=clusters, fingerprints={}, weights={})
+
+    import numpy as np  # noqa: PLC0415
+
+    # Fingerprint from the longer phrases, where the embedding is reliable; fall back to any embeddable
+    # phrase for a speaker who only ever said short things in this part.
+    anchors: dict[int, list] = {}
+    others: dict[int, list] = {}
+    for cluster, seg, voice in zip(clusters, segments, voices):
+        if voice is None:
+            continue
+        bucket = anchors if seg.end - seg.start >= ANCHOR_SECONDS else others
+        bucket.setdefault(cluster, []).append(voice)
+
+    fingerprints: dict[int, object] = {}
+    weights: dict[int, int] = {}
+    for cluster in dict.fromkeys(clusters):          # first-appearance order
+        vectors = anchors.get(cluster) or others.get(cluster)
+        if not vectors:
+            continue
+        mean = np.mean(vectors, axis=0)
+        norm = float(np.linalg.norm(mean))
+        if norm > 0:
+            fingerprints[cluster] = mean / norm
+            weights[cluster] = len(vectors)
+    return ChunkSpeakers(clusters=clusters, fingerprints=fingerprints, weights=weights)
+
+
+#: How alike two fingerprints must be to be the SAME person even when the diarizer said they were two
+#: speakers in one part. Diarizers over-split: a host's interjections ("mm", "yes") become a cluster of their
+#: own. On the fixtures (3 real voices, 5 parts) those fragments scored 0.81-0.94 against their own speaker
+#: while different people never passed 0.59, so 0.78 sits in the gap with room on both sides.
+MERGE_THRESHOLD = 0.78
+
+
+class SpeakerLinker:
+    """Gives speakers one identity across the parts of a long recording.
+
+    Feed it each part's :class:`ChunkSpeakers` in order; it answers with a global speaker number for every
+    local cluster. Two rules, from how real diarizers behave:
+
+    * A local speaker joins the most similar known speaker once they are ``threshold`` alike, matched
+      best-first and one-to-one within a part (the diarizer said these are different people).
+    * Except when they are near-identical (``merge_threshold``): then the diarizer split one voice in two and
+      the pieces rejoin. Left alone, every short interjection became an extra "person".
+
+    Whoever matches nobody is new; the biggest unmatched cluster is placed first so a small one that sounds
+    like it can join it instead of becoming a stranger.
+    """
+
+    def __init__(self, threshold: float = LINK_THRESHOLD, merge_threshold: float = MERGE_THRESHOLD) -> None:
+        self.threshold = threshold
+        self.merge_threshold = merge_threshold
+        self._sums: list = []      # running weighted sum of fingerprints, per global speaker
+
+    @property
+    def speaker_count(self) -> int:
+        return len(self._sums)
+
+    def link(self, part: ChunkSpeakers) -> dict[int, int]:
+        """Map each local cluster id in ``part`` to a global speaker index (0-based, in creation order).
+
+        A local cluster with no fingerprint is absent from the result; the caller leaves its segments
+        unlabelled rather than guess. Numbering as "Person N" is by first appearance in the transcript, which
+        the caller does once everything is linked.
+        """
+        import numpy as np  # noqa: PLC0415
+
+        # What the known speakers sounded like BEFORE this part: folding this part's matches in first would
+        # drag a centroid towards them and let a different voice look like a fragment of it.
+        known = [total / np.linalg.norm(total) for total in self._sums]
+
+        def similarity_to(index: int, fingerprint) -> float:
+            if index < len(known):
+                return float(fingerprint @ known[index])
+            total = self._sums[index]                 # created in this part
+            return float(fingerprint @ (total / np.linalg.norm(total)))
+
+        def fold(local: int, index: int) -> None:
+            self._sums[index] = self._sums[index] + part.fingerprints[local] * part.weights.get(local, 1)
+
+        pairs = sorted(
+            (
+                (similarity_to(index, fingerprint), local, index)
+                for local, fingerprint in part.fingerprints.items()
+                for index in range(len(self._sums))
+            ),
+            reverse=True,
+        )
+        mapping: dict[int, int] = {}
+        taken: set[int] = set()
+        for similarity, local, index in pairs:
+            if similarity < self.threshold:
+                break
+            if local in mapping or index in taken:
+                continue
+            mapping[local] = index
+            taken.add(index)
+        for local, index in mapping.items():
+            fold(local, index)
+
+        # What is left: a near-identical voice is the same person split by the diarizer, anything else is
+        # new. Biggest first, so fragments find the main voice rather than the other way round.
+        leftover = sorted(
+            (local for local in part.fingerprints if local not in mapping),
+            key=lambda local: -part.weights.get(local, 1),
+        )
+        for local in leftover:
+            fingerprint = part.fingerprints[local]
+            scores = [(similarity_to(index, fingerprint), index) for index in range(len(self._sums))]
+            best, best_index = max(scores, default=(-1.0, -1))
+            if best >= self.merge_threshold:
+                mapping[local] = best_index
+            else:
+                self._sums.append(np.zeros_like(fingerprint))
+                mapping[local] = len(self._sums) - 1
+            fold(local, mapping[local])
+        return mapping

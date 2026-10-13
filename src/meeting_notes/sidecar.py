@@ -243,6 +243,11 @@ def main(argv: Optional[list] = None) -> int:
         pass
     finally:
         set_shutdown_hook(None)
+        # The language-model server (if one was started) holds ~3 GB; stop it with the engine. A hard kill
+        # is covered separately, by the job object it was started under.
+        from meeting_notes.llm import shutdown_runtime  # noqa: PLC0415
+
+        shutdown_runtime()
 
     return 0
 

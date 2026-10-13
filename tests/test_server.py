@@ -77,6 +77,17 @@ def test_health_needs_no_token(client, authed):
     assert response.json()["status"] == "ok"
 
 
+def test_health_reports_the_api_version_a_host_checks(client, authed):
+    """A host (Weave, the Tauri shell) refuses an engine whose number it does not know."""
+    from meeting_notes import __version__
+    from meeting_notes.server import API_VERSION
+
+    body = client.get("/health").json()
+    assert body["api"] == API_VERSION
+    assert isinstance(body["api"], int)
+    assert body["version"] == __version__
+
+
 def test_health_reports_whether_auth_is_on(client, authed):
     assert client.get("/health").json()["auth"] is True
 

@@ -41,7 +41,9 @@ CLI command (main.py)
 | `src/meeting_notes/diarize.py` | Speaker diarization (sherpa-onnx pyannote + CAM++, same models as mobile); labels segments "Person N"; re-checks each short phrase against every speaker's voice to undo turn-edge flips (desktop only); models auto-download to `models_dir()/diarization` (~34 MB); degrades to no-speakers on any failure |
 | `src/meeting_notes/backends/omnilingual.py` | `OmnilingualBackend` — Meta Omnilingual ASR 300M CTC via sherpa-onnx; the `ceb` (Cebuano/Bisaya) route; ~292 MB auto-download to `models_dir()/omnilingual`; language-agnostic, stamps the requested code |
 | `src/meeting_notes/backends/router.py` | Language mode → engine: `en`/`auto` → faster-whisper, `tl` → NeMo Tagalog, `ceb` → Omnilingual; each dedicated engine falls back to Whisper (Cebuano as `tl`) with `backend` recorded for the UI |
-| `src/meeting_notes/summarizer.py` | `Summarizer` calls Ollama (JSON prompt) or extractive fallback; returns `MeetingNotes` dataclass |
+| `src/meeting_notes/llm.py` | The bundled language model: a PINNED catalog (llama.cpp build tag + sha256; each GGUF with sha256 and a Hugging Face revision in its URL), a resumable verified `Installer` (download, hash, zip-slip-safe unpack, start the model once and ask it a question BEFORE writing `installed.json`), and `Runtime` which runs `llama-server` as a child of the engine under a Windows kill-on-close job object, idle-stops after 5 min, and asks for JSON via the server's grammar. `BundledProvider` is what `Summarizer(provider=...)` calls; `LlmUnavailable` means "could not be reached" (give up at the first part), not "answered badly". Routes `GET /llm`, `POST /llm/install?model=`, `DELETE /llm/install`, `DELETE /llm` |
+| `src/meeting_notes/jobs.py` | Background notes jobs for hosts that cannot hold a request open (Weave): `JobQueue` runs ONE job at a time on a worker thread, in memory (a job does not survive a restart; the saved meeting does). Routes `POST /jobs`, `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` in `server.py`. The uploaded audio copy lives under `data/jobs/` and is deleted when the job ends, however it ends; anything left there at start-up is swept |
+| `src/meeting_notes/summarizer.py` | `Summarizer` calls Ollama (JSON prompt) or extractive fallback; returns `MeetingNotes` dataclass. Transcripts over `SINGLE_PASS_CHARS` are summarised in parts (`_summarize_long`) and merged (`_reduce`); `num_ctx` is set explicitly |
 | `src/meeting_notes/document.py` | `generate_document` dispatches to `_write_markdown` or `_write_docx` |
 | `src/meeting_notes/config.py` | `WHISPER_MODELS`, `DEFAULT_*`, `SUPPORTED_LANGUAGES`, `AppConfig` dataclass |
 
@@ -149,6 +151,7 @@ Key points:
   `enrich()`, which is the only place the medical lexicon runs.
 - **`highlightSpans` highlights only the terms it is given** — it does not consult the
   lexicon itself. A meeting carries no `medical_terms`, so it renders unhighlighted.
+- **`API_VERSION` (`meeting_notes/server.py`, reported at `/health` as `api`) is the contract with whatever hosts the engine** (this Tauri shell, or Weave, which downloads the engine separately and refuses one whose number it does not know). Bump it when a route a host depends on changes shape or goes away; NOT on every release. `scripts/publish-notes-engine.ps1` in the Weave repo refuses to publish an exe whose `/health` disagrees with this file, so rebuild the sidecar after changing it.
 - **Sidecar handshake:** the sidecar binds a random loopback port + bearer token and writes
   one JSON line to stdout. Never assume a fixed port. See `desktop/README.md`.
 - `lib/types.ts` and `lib/medicalTerms.ts` are deliberate copies of the mobile versions,

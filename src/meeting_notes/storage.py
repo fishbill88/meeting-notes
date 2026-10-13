@@ -36,7 +36,7 @@ from typing import Any, Iterator, Optional
 from meeting_notes.crypto import Vault
 
 #: Bumped whenever the schema changes; see ``_MIGRATIONS``.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DB_FILENAME = "meetings.db"
 KEY_FILENAME = "meetings.key"
@@ -52,6 +52,11 @@ class MeetingRecord:
     transcript: dict
     notes: dict
     speaker_names: dict = field(default_factory=dict)
+    #: The person's own notepad lines as they were when Enhance last ran: ``[{"t": seconds | None, "text"}]``.
+    my_notes: list = field(default_factory=list)
+    #: The enhanced notes tree (``enhance.enhance``), or ``{}`` before Enhance has run. Derived: it can
+    #: always be regenerated from ``my_notes`` and the transcript.
+    enhanced: dict = field(default_factory=dict)
 
     @property
     def title(self) -> str:
@@ -94,6 +99,8 @@ class MeetingRecord:
             transcript=data.get("transcript") or {},
             notes=data.get("notes") or {},
             speaker_names=data.get("speaker_names") or {},
+            my_notes=data.get("my_notes") or [],
+            enhanced=data.get("enhanced") or {},
         )
 
     def searchable_text(self) -> str:
@@ -105,6 +112,7 @@ class MeetingRecord:
         ]
         for key in ("key_topics", "decisions", "action_items"):
             parts.extend(str(v) for v in (self.notes.get(key) or []))
+        parts.extend(str(line.get("text") or "") for line in self.my_notes if isinstance(line, dict))
         return "\n".join(parts)
 
 
@@ -135,6 +143,15 @@ _MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_meetings_created
         ON meetings (created_at DESC);
+    """,
+    # v2 - notepads: what a person types during (or after) a call, kept under a key the host chooses so it
+    # survives before any notes exist. Encrypted like a meeting.
+    """
+    CREATE TABLE IF NOT EXISTS notepads (
+        key         TEXT PRIMARY KEY,
+        updated_at  TEXT NOT NULL,
+        payload     BLOB NOT NULL
+    );
     """,
 ]
 
@@ -247,6 +264,34 @@ class MeetingStore:
         with self._connect() as conn:
             cursor = conn.execute("DELETE FROM meetings WHERE id = ?", (record_id,))
             return cursor.rowcount > 0
+
+    # -- notepads ------------------------------------------------------
+
+    def save_notepad(self, key: str, lines: list[dict]) -> str:
+        """Replace the notepad stored under ``key``. Returns its update time (UTC, ISO)."""
+        updated = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        payload = self.vault.encrypt(json.dumps({"lines": lines}))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO notepads (key, updated_at, payload) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload
+                """,
+                (key, updated, payload),
+            )
+        return updated
+
+    def get_notepad(self, key: str) -> Optional[tuple[list[dict], str]]:
+        """``(lines, updated_at)`` for ``key``, or ``None`` when nothing was ever saved there."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT updated_at, payload FROM notepads WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        return json.loads(self.vault.decrypt(row["payload"])).get("lines") or [], row["updated_at"]
+
+    def delete_notepad(self, key: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute("DELETE FROM notepads WHERE key = ?", (key,)).rowcount > 0
 
     def count(self) -> int:
         with self._connect() as conn:
