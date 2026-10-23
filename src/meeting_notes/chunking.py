@@ -58,6 +58,13 @@ def probe_duration(path: str) -> Optional[float]:
 
     Uses PyAV (already a dependency, via faster-whisper). ``None`` means "treat it as short": a file whose
     length cannot be read is better processed whole than refused.
+
+    **A WebM from a browser's MediaRecorder has NO duration in its header** — the recorder writes the file
+    as it goes and never goes back to fill it in — and every recording Weave makes is one. Reading only the
+    header called a 70-minute call "unknown", hence short, and it went through the single pass: no progress,
+    the whole hour in memory, and the diarizer clustering an hour of voices at once, which ran for hours.
+    So when the header says nothing, the audio packets are DEMUXED (not decoded) and the last timestamp
+    taken: about a second for a 300 MB file.
     """
     try:
         import av  # noqa: PLC0415
@@ -68,9 +75,24 @@ def probe_duration(path: str) -> Optional[float]:
             for stream in container.streams.audio:
                 if stream.duration and stream.time_base:
                     return float(stream.duration * stream.time_base)
+            return _last_audio_timestamp(container)
     except Exception:  # noqa: BLE001
         logger.debug("could not probe the duration of %s", path, exc_info=True)
     return None
+
+
+def _last_audio_timestamp(container) -> Optional[float]:
+    """The end of the last audio packet, in seconds, read by demuxing; ``None`` if there is no audio."""
+    if not container.streams.audio:
+        return None
+    end = None
+    for packet in container.demux(container.streams.audio[0]):
+        if packet.pts is None or packet.time_base is None:
+            continue
+        stamp = float((packet.pts + (packet.duration or 0)) * packet.time_base)
+        if end is None or stamp > end:
+            end = stamp
+    return end
 
 
 def needs_chunking(duration_seconds: Optional[float]) -> bool:

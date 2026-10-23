@@ -121,6 +121,45 @@ def test_probing_a_missing_file_is_none_not_an_error(tmp_path):
     assert chunking.probe_duration(str(tmp_path / "nope.webm")) is None
 
 
+class _Packet:
+    def __init__(self, pts, duration, time_base):
+        self.pts, self.duration, self.time_base = pts, duration, time_base
+
+
+class _NoDurationContainer:
+    """What PyAV shows for a MediaRecorder WebM: no duration on the container or the stream, only packets."""
+
+    def __init__(self, packets):
+        stream = type("Stream", (), {"duration": None, "time_base": None})()
+        self.duration = None
+        self.streams = type("Streams", (), {"audio": [stream]})()
+        self._packets = packets
+
+    def demux(self, stream):
+        return iter(self._packets)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_webm_with_no_duration_header_is_measured_from_its_packets(monkeypatch):
+    # Every Weave recording is one of these. Reading it as "unknown" sent a 70-minute call down the single
+    # pass, which ran for hours; it must be measured and chunked.
+    from fractions import Fraction
+
+    import av
+
+    ms = Fraction(1, 1000)
+    packets = [_Packet(0, 20, ms), _Packet(2_400_000, 20, ms), _Packet(None, None, None), _Packet(4_162_891, 20, ms)]
+    monkeypatch.setattr(av, "open", lambda path: _NoDurationContainer(packets))
+    duration = chunking.probe_duration("recording.webm")
+    assert duration == pytest.approx(4162.911)
+    assert needs_chunking(duration)
+
+
 # ---------------------------------------------------------------------------
 # Speaker linking across parts
 # ---------------------------------------------------------------------------
@@ -340,6 +379,83 @@ def test_progress_is_reported_per_part_and_ends_at_one(long_audio):
     assert 0 < fractions[0] < 0.5
 
 
+class SecondsBackend(FakeBackend):
+    """Reports how far into each part it has decoded, as a real backend does per segment."""
+
+    def transcribe_array(self, audio, sample_rate=16000):
+        result = super().transcribe_array(audio, sample_rate)
+        length = len(audio) / sample_rate
+        for s in (length * 0.25, length * 0.5, length):
+            self.on_seconds(s)
+        return result
+
+
+def test_progress_moves_within_a_part_not_only_between_parts(long_audio):
+    fractions = []
+    backend = SecondsBackend()
+    _run(backend, on_fraction=fractions.append)
+    parts = len(backend.calls)
+    # First part, a quarter decoded: a quarter of its transcribing share of its span.
+    first_span = backend.calls[0] / 1200
+    assert fractions[0] == pytest.approx(pipeline._AUDIO_SHARE * first_span * pipeline._TRANSCRIBE_SHARE * 0.25)
+    assert len(fractions) >= parts * 4                      # three in-part reports plus the part's end, each part
+    assert fractions == sorted(fractions)
+    assert fractions[-1] == 1.0
+
+
+def test_the_seconds_callback_is_taken_off_after_each_call(long_audio):
+    backend = SecondsBackend()
+    _run(backend, on_fraction=lambda f: None)
+    assert backend.on_seconds is None                       # a later job must not report into this one
+
+
+class ShortBackend:
+    """A single-pass backend: reads the file itself and reports seconds of a 300 s recording."""
+
+    name = "fake"
+    language = None
+    on_seconds = None
+
+    def transcribe_file(self, path):
+        for s in (75.0, 150.0, 300.0):
+            if self.on_seconds:
+                self.on_seconds(s)
+        return TranscriptionResult(text="short", language="en", language_name="English", backend="fake",
+                                   segments=[TranscriptSegment(start=0.0, end=300.0, text="short")])
+
+
+def test_a_short_recording_shows_progress_too(monkeypatch):
+    # It used to report nothing at all: one pass had "no measure", yet its length is known.
+    monkeypatch.setattr(chunking, "probe_duration", lambda path: 300.0)
+    fractions = []
+    _run(ShortBackend(), on_fraction=fractions.append)
+    transcribe_end = pipeline._AUDIO_SHARE * pipeline._TRANSCRIBE_SHARE
+    assert fractions[0] == pytest.approx(transcribe_end * 0.25)
+    assert transcribe_end in fractions and pipeline._AUDIO_SHARE in fractions
+    assert fractions == sorted(fractions)
+    assert fractions[-1] == 1.0
+
+
+def test_a_recording_of_unknown_length_reports_only_the_end(monkeypatch):
+    monkeypatch.setattr(chunking, "probe_duration", lambda path: None)
+    fractions = []
+    _run(ShortBackend(), on_fraction=fractions.append)
+    assert fractions == [1.0]                               # nothing to measure against, so nothing guessed
+
+
+def test_a_failing_progress_callback_cannot_fail_a_transcription():
+    from meeting_notes.backends.base import TranscriptionBackend
+
+    class Backend(TranscriptionBackend):
+        def transcribe_array(self, audio, sample_rate=16000):
+            self.report_seconds(1.0)
+            return TranscriptionResult(text="ok", language="en", language_name="English", backend="x")
+
+    backend = Backend()
+    backend.on_seconds = lambda s: 1 / 0
+    assert backend.transcribe_array([0.0]).text == "ok"
+
+
 def test_a_short_recording_takes_the_single_pass_untouched(monkeypatch):
     monkeypatch.setattr(chunking, "probe_duration", lambda path: 120.0)
     called = {}
@@ -355,7 +471,8 @@ def test_a_short_recording_takes_the_single_pass_untouched(monkeypatch):
     assert called["file"] == "long.webm"                    # the old path: the backend read the file itself
     assert backend.calls == []                              # never asked for parts
     assert result.transcript.text == "whole"
-    assert fractions == [1.0]                               # no part-by-part progress without parts
+    # No parts, but its length is known, so it still steps: transcribed, speakers done, notes written.
+    assert fractions == [pipeline._AUDIO_SHARE * pipeline._TRANSCRIBE_SHARE, pipeline._AUDIO_SHARE, 1.0]
 
 
 def test_cancelling_stops_between_parts(long_audio):

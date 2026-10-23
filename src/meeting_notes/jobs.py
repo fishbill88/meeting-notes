@@ -84,7 +84,10 @@ class Job:
         self.message = message
 
     def set_progress(self, fraction: float) -> None:
-        self.progress = max(0.0, min(1.0, float(fraction)))
+        """Never backwards: a part that fails and is retried decodes from its start again, and a bar that
+        slides back reads as lost work. The retry simply holds the bar until it passes the old mark."""
+        value = max(0.0, min(1.0, float(fraction)))
+        self.progress = value if self.progress is None else max(self.progress, value)
 
     def public(self, queue_position: Optional[int] = None) -> dict:
         """What a host is told. Never includes the audio path or the config."""

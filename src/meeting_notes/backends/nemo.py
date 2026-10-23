@@ -148,6 +148,7 @@ class NemoTagalogBackend(TranscriptionBackend):
 
         for start_sample, region in regions:
             text = self._decode(recognizer, region)
+            self.report_seconds((start_sample + len(region)) / DEFAULT_SAMPLE_RATE)
             if not text.strip():
                 continue
             start = start_sample / DEFAULT_SAMPLE_RATE

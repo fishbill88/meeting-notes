@@ -12,6 +12,7 @@ Progress is reported through an optional callback instead.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
 from typing import Callable, Optional
@@ -77,8 +78,9 @@ def run_pipeline(
         config: Validated app configuration. Its ``language_mode`` selects
             the engine.
         on_progress: Optional ``(stage, message)`` callback for UI feedback.
-        on_fraction: Optional callback given overall progress, 0-1. Only called for a recording that is
-            processed in parts; a single pass has no measure of how far through it is.
+        on_fraction: Optional callback given overall progress, 0-1, as the work goes: during transcription as
+            each segment is decoded (the backend's ``on_seconds``), then at each step. Not called at all for a
+            single pass over a file whose length cannot be read: there is nothing to measure against.
         should_cancel: Optional callback polled between steps; true raises
             :class:`~meeting_notes.cancel.PipelineCancelled`.
 
@@ -107,13 +109,23 @@ def run_pipeline(
         )
     else:
         report("transcribe", f"Transcribing with {backend.name}…")
-        transcript = backend.transcribe_file(audio_path)
+        # A length the probe could not read leaves the fraction unreported rather than guessed.
+        whole = duration if duration and duration > 0 else None
+        with _reporting_seconds(
+            backend,
+            (lambda s: fraction(_AUDIO_SHARE * _TRANSCRIBE_SHARE * min(1.0, s / whole))) if whole else None,
+        ):
+            transcript = backend.transcribe_file(audio_path)
+        if whole:
+            fraction(_AUDIO_SHARE * _TRANSCRIBE_SHARE)
 
         if config.diarize and transcript.segments:
             from meeting_notes.diarize import assign_speakers  # noqa: PLC0415
 
             report("diarize", "Identifying speakers…")
             assign_speakers(transcript.segments, audio_path)
+        if whole:
+            fraction(_AUDIO_SHARE)
 
     if cancelled():
         raise PipelineCancelled()
@@ -136,7 +148,9 @@ def run_pipeline(
         ollama_url=config.ollama_url,
         ollama_model=config.ollama_model,
         provider=provider,
-        on_part=on_part if chunked else None,
+        # A short recording can still have a long transcript (a fast talker, a busy room); the parts are
+        # progress whichever way the audio was transcribed.
+        on_part=on_part,
         should_cancel=cancelled,
     )
     from meeting_notes.summarizer import speaker_text  # noqa: PLC0415
@@ -199,7 +213,12 @@ def _transcribe_in_parts(
         piece = audio[int(chunk.start * sample_rate):int(chunk.end * sample_rate)]
 
         report("transcribe", f"Transcribing {label} with {backend.name}…")
-        result = _transcribe_piece(backend, piece, sample_rate, label)
+        # Default arguments bind THIS part's numbers: a bare closure would read the loop's last values.
+        def on_seconds(s, before=done_before, width=span, length=max(chunk.duration, 1e-6)):
+            fraction(_AUDIO_SHARE * (before + width * _TRANSCRIBE_SHARE * min(1.0, s / length)))
+
+        with _reporting_seconds(backend, on_seconds):
+            result = _transcribe_piece(backend, piece, sample_rate, label)
         fraction(_AUDIO_SHARE * (done_before + span * _TRANSCRIBE_SHARE))
 
         # One language for the whole recording, as a single pass would have: Whisper detects from the start
@@ -237,6 +256,21 @@ def _transcribe_in_parts(
         segments=segments,
         backend=backend.name,
     )
+
+
+@contextmanager
+def _reporting_seconds(backend, callback: Optional[Callable[[float], None]]):
+    """Attach ``callback`` as the backend's ``on_seconds`` for one call, and take it off again after, so a
+    backend reused by the next job (the server caches nothing, but the CLI and tests do) never reports into a
+    finished job's progress."""
+    if callback is None:
+        yield
+        return
+    backend.on_seconds = callback
+    try:
+        yield
+    finally:
+        backend.on_seconds = None
 
 
 def _transcribe_piece(backend, piece, sample_rate: int, label: str):

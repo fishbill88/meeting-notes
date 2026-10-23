@@ -7,7 +7,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from meeting_notes.config import DEFAULT_SAMPLE_RATE
 
@@ -77,6 +77,23 @@ class TranscriptionBackend(ABC):
 
     #: Short stable identifier, e.g. ``"faster-whisper"``.
     name: str = "base"
+
+    #: How far into the audio decoding has got, in seconds of THE AUDIO BEING TRANSCRIBED, called as it goes.
+    #: Set by the pipeline around one call and cleared after, so it is per call, not per backend. Without it a
+    #: progress bar moved only between steps: a five-minute part sat still for five minutes, and a recording
+    #: short enough for one pass showed nothing at all. A backend that never calls it still works.
+    on_seconds: Optional[Callable[[float], None]] = None
+
+    def report_seconds(self, seconds: float) -> None:
+        """Tell :attr:`on_seconds`, if anyone is listening. Never raises: a progress report must not be able
+        to fail a transcription."""
+        callback = self.on_seconds
+        if callback is None:
+            return
+        try:
+            callback(seconds)
+        except Exception:  # noqa: BLE001
+            pass
 
     @abstractmethod
     def transcribe_array(

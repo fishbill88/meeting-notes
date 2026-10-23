@@ -49,6 +49,19 @@ def _wait(predicate, timeout: float = 5.0) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_progress_never_goes_backwards(tmp_path):
+    # A retried part decodes from its start again; the bar holds instead of sliding back.
+    job = _job(tmp_path)
+    assert job.progress is None
+    job.set_progress(0.4)
+    job.set_progress(0.2)
+    assert job.progress == 0.4
+    job.set_progress(0.6)
+    assert job.progress == 0.6
+    job.set_progress(7)
+    assert job.progress == 1.0
+
+
 def test_a_job_runs_and_records_the_meeting_id(tmp_path):
     q = JobQueue(lambda job: "meeting-1")
     job = q.submit(_job(tmp_path))

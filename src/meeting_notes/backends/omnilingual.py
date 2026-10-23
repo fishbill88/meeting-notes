@@ -168,6 +168,7 @@ class OmnilingualBackend(TranscriptionBackend):
         segments: list[TranscriptSegment] = []
         for start_sample, region in self._speech_regions(audio):
             text = clean_latin_text(self._decode(recognizer, region))
+            self.report_seconds((start_sample + len(region)) / DEFAULT_SAMPLE_RATE)
             if not text.strip():
                 continue
             start = start_sample / DEFAULT_SAMPLE_RATE

@@ -136,17 +136,20 @@ class FasterWhisperBackend(TranscriptionBackend):
 
         detected = getattr(info, "language", None) or self.language or "unknown"
 
-        # faster-whisper streams segments lazily; decoding happens on iteration.
-        segments = [
-            TranscriptSegment(
-                start=seg.start,
-                end=seg.end,
-                text=seg.text,
-                lang=detected,
-                confidence=logprob_to_confidence(getattr(seg, "avg_logprob", None)),
+        # faster-whisper streams segments lazily; decoding happens on iteration, so each segment's end is how
+        # far the decode has really got.
+        segments = []
+        for seg in segments_iter:
+            segments.append(
+                TranscriptSegment(
+                    start=seg.start,
+                    end=seg.end,
+                    text=seg.text,
+                    lang=detected,
+                    confidence=logprob_to_confidence(getattr(seg, "avg_logprob", None)),
+                )
             )
-            for seg in segments_iter
-        ]
+            self.report_seconds(seg.end)
 
         return TranscriptionResult(
             text=" ".join(s.text.strip() for s in segments).strip(),
