@@ -4,8 +4,10 @@ Consolidated research log for speech recognition and note-generation options.
 Written so it can be picked up cold months later, and so specific claims can be
 re-checked online without redoing the whole investigation.
 
-**Last updated:** 2026-09-07 — Cebuano/Bisaya pass and training playbook (§6a
-update, §9, §9b, §9c). Earlier passes: 2026-07-28, 2026-07-30.
+**Last updated:** 2026-11-23 — NVIDIA pass: Nemotron 3.5 Transcribe, Nemotron 3
+Diarization, Parakeet v3 and context biasing (§3 rewritten; §4, §8, §10, §13–15
+updated). Earlier passes: 2026-07-28, 2026-07-30, 2026-09-07 (Cebuano/Bisaya
+and the training playbook: §6a, §9, §9b, §9c).
 **Scope:** desktop app (Windows), Philippine languages, **corporate meetings
 first** (medical parked — see `CLAUDE.md`). Older sections still say "clinic";
 read that as "meeting".
@@ -23,6 +25,7 @@ several vendor numbers in this space turned out to be misleading.
 | **[SOURCE]** | Extracted from the vendor's own repo/API, not their marketing. Trust the fact, question the framing. |
 | **[PAPER]** | Published research figure. Check the test set before comparing. |
 | **[VENDOR]** | Vendor's own claim, unverified. Treat as a hypothesis. |
+| **[ESTIMATE]** | Our own arithmetic from measured or published inputs. Nobody ran it. |
 | **[STALE-RISK]** | Fast-moving; re-check before relying on it. |
 
 **Fit ratings** for this project:
@@ -84,29 +87,221 @@ Tagalog-trained one mis-segments the root. **[PAPER]**
 
 ---
 
-## 3. NVIDIA NeMo family — 🔴 Ruled out
+## 3. NVIDIA NeMo family — 🔴 for Filipino on-device · 🟡 two pieces to bench
 
-Investigated because it was the original proposal. **No NVIDIA ASR model
-supports Filipino in any tier.** **[SOURCE]** — verified against model cards.
+> **Correction (2026-11-23).** Earlier passes said "no NVIDIA ASR model
+> supports Filipino in any tier". That stopped being true on 2026-10-28:
+> **Nemotron 3.5 Transcribe 30B-A4B** lists Tagalog, with code-switching, in
+> its lowest ("Supported") tier **[SOURCE]**. It is still out of reach for this
+> app (§3a), and the small NVIDIA models still have no Tagalog. Two other
+> NVIDIA releases are worth benching for reasons unrelated to Filipino: the
+> diarizer (§3b) and Parakeet for English-only meetings (§3c). The idea worth
+> taking from all of them costs no new model (§3d).
 
-| Model | Languages | Filipino? |
-|---|---|---|
-| `nemotron-3.5-asr-streaming-0.6b` | 40 locales, 3 tiers | ❌ not in any tier |
-| `parakeet-tdt-0.6b-v3` | 25 European | ❌ |
-| `canary-1b-v2` | 25 European | ❌ |
-| Granary corpus (1M hrs) | EU-focused | ❌ |
+| Model | Languages | Filipino? | Laptop CPU? |
+|---|---|---|---|
+| **Nemotron 3.5 Transcribe 30B-A4B** (2026-10-28) | 40 transcribed; 31 translated; speakers for 13 | 🟡 Tagalog, "Supported" tier, ASR + code-switching. No Cebuano | ❌ 15–37 GB (§3a) |
+| `NVIDIA-Nemotron-3.5-ASR-Streaming-Multilingual-0.6b` (was `nemotron-3.5-asr-streaming-0.6b`) | 40 locales, 3 tiers | ❌ re-checked 2026-11-23, not in any tier | ✅ |
+| `parakeet-tdt-0.6b-v3` | 25 European | ❌ — English only for us (§3c) | ✅ |
+| `canary-1b-v2` | 25 European | ❌ | — |
+| Granary **v2** (public manifest: 463,062 h, 16 source corpora) | 48 | ❓ not checked whether Tagalog/Cebuano are among the 48. Manifests only: the audio comes from each source corpus under its own licence | — |
 
 Also: `stt_en_fastconformer_hybrid_large_streaming_multi` (the specific model
 originally recommended) is **superseded** by Nemotron 3.5 ASR Streaming.
 
-**Why ruled out:** choosing NeMo means bootstrapping a language NVIDIA has
-never touched — new tokenizer, new decoder, hundreds of hours of labelled
-Taglish clinical audio that does not exist. The `change_vocabulary()` /
-encoder-freeze workflow is real and documented, but it is domain adaptation,
-not language creation.
+**Why the small models stay ruled out for Filipino:** choosing one means
+bootstrapping a language NVIDIA has never touched — new tokenizer, new decoder,
+hundreds of hours of labelled Taglish audio that does not exist. The
+`change_vocabulary()` / encoder-freeze workflow is real and documented, but it
+is domain adaptation, not language creation.
 
-**Still worth borrowing:** their **KenLM / N-gram LM fusion** approach for
-biasing decoding toward drug names. That idea generalises to every engine.
+### 3a. Nemotron 3.5 Transcribe 30B-A4B (2026-10-28, OpenMDW-1.1) — ⚪ Parked on-device · 🔵 Watch for a company GPU server
+
+**What it is [SOURCE]:** a speech LLM. A ~600M Transformer ASR encoder and a
+~99M speaker encoder (the Sortformer from §3b) feed a Nemotron 3.5
+Mamba-2/Transformer mixture-of-experts language model. **34B total, 4.3B active
+per token** (the name says 30B; the 34B includes the encoders). Offline only —
+"This is an offline model". One file up to **1 hour** (65,536-token context,
+~80 ms of audio per encoder token), 16 kHz mono in. Commercial use allowed.
+
+**What it does [SOURCE]:** one model, steered by the prompt — verbatim or
+written-form transcript with punctuation; speaker-attributed transcript
+(`<spk:N>` tags: the blog says up to 8 speakers, the card's examples only show
+0–3); word timestamps from a CTC head; translation to and from English;
+language ID; PII tagging; audio Q&A; and **context terms** (names and jargon
+put in the prompt to steer spelling, see §3d).
+
+| Benchmark | Nemotron 3.5 Transcribe **[VENDOR]** | For comparison |
+|---|---|---|
+| Open ASR English, 9-set mean WER | **4.71** | Whisper large-v3 **7.44** — leaderboard mean over 8 sets **[PAPER]**, so a different mix |
+| AMI (meeting audio) | 7.81 | — |
+| Open ASR long-form mean | 10.98 | Parakeet-TDT-0.6B-v3 13.37 |
+| Multi-speaker cpWER: AMI SDM / NOTSOFAR-1 SC | 17.34 / 25.91 | 6-set mean 15.80 vs 16.83 for DiCoW v3.3 + DiariZen |
+| Earnings22 with context terms (none → local) | 12.54 → 9.58 | — |
+| **FLEURS Filipino** | **18.28 WER** | NCSpeech FastConformer **9.34** (§5, also **[VENDOR]**) |
+| Cebuano | not offered | Omnilingual CTC (§6a) |
+
+**Size and hardware [SOURCE]:** NVIDIA targets one H100 80 GB (BF16), an
+L40S 48 GB (FP8) or an RTX 5090 (NVFP4). Runtimes: vLLM (the primary path),
+SGLang-Omni, Transformers, NeMo, and NeMo-Speech.cpp (§10). The community GGUF
+build (AtomicChat) needs a **1.67 GB** encoder file plus one decoder:
+
+| Decoder | Size | Note |
+|---|---|---|
+| Q8_0 | 35.00 GB | |
+| AD-IQ4_NL | 19.68 GB | The build's own pick for CPU / Vulkan / Metal. WER within ±0.15 points of BF16 on its sample |
+| AD-Q2_0_M | 13.57 GB | Smallest. 15.6 GiB peak, measured on an A100 |
+
+Every measurement on that page ran on CUDA. **Nobody has published a CPU
+speed or RAM figure for any quant.**
+
+**On a laptop CPU [ESTIMATE]:** an hour of audio is ~45,000 audio tokens to
+read and ~12,000 text tokens to write. At the rates our bundled 4B notes model
+measured on an i9-13900HX (~10–60 prompt tokens/s, ~3.5–9 generated tokens/s,
+NOTES-PLAN.md; 4.3B active parameters is comparable work per token), that is
+**roughly 35 minutes to over 2 hours per hour of meeting**, with 17 GB+ in RAM
+and a 15–37 GB download. The chunked pipeline already does a 21-minute file in
+~18 minutes **[MEASURED]** (NOTES-PLAN.md, long recordings) from a ~1.8 GB
+download. No gain on speed, ten times the footprint.
+
+**Verdict.** ⚪ Parked for the engine: too large for a laptop, worse Tagalog
+than §5, no Cebuano. It is the best open model found for **English meetings**,
+and does speakers in the same pass, so it stays 🔵 on watch for one case: **a
+company GPU server** — one RTX 5090-class card; NVIDIA quotes 100 hours of
+audio in under 3 minutes on an RTX PRO 6000 at NVFP4 **[VENDOR]**. That sends
+recordings off the PC, which reverses the local-only design (`PRIVACY.md`, §11).
+It is a decision for the product owner, not an engineering default. Hosted
+endpoints (Baseten, DeepInfra, Simplismart) fall under §8.
+
+**The one test worth paying for:** the card claims Tagalog code-switching, and
+Taglish (§2, problem 2) is the gap nothing we ship covers. Run it once over the
+`Recordings/` Taglish and Bisaya fixtures on a **rented GPU** — not a hosted
+API, since the fixtures may be real company audio. Only if it handles Taglish
+well is the server question worth asking.
+
+Failure modes NVIDIA lists **[SOURCE]**: substitutions, deletions, repetitions,
+hallucinated speech and wrong-language output. It recommends targeted testing
+for long recordings, overlapping speakers, noise, names and code-switching.
+
+### 3b. Nemotron 3 Diarization (2026-09-23, OpenMDW-1.1) — 🟡 Queued for a bench
+
+A separate **~100M** Sortformer model (also the speaker branch inside §3a).
+Up to **8 speakers**, offline (30.4 s buffer) or streaming (down to 0.32 s).
+Runs in NeMo, Transformers and NeMo-Speech.cpp (`nemo-speech diarize`). No ONNX
+export found, so sherpa-onnx cannot run it.
+
+| Set | DER, 30.4 s **[VENDOR]** | Previous Sortformer v2.1 |
+|---|---|---|
+| AMI SDM | 11.14 | 21.42 |
+| NOTSOFAR-1 SC | 11.00 | 30.49 |
+| DIHARD III | 12.73 | 19.09 |
+| CALLHOME-2 | 9.10 | 10.32 |
+
+The card has no pyannote comparison. It is weaker with many people: DIHARD III
+DER is 27.58 for 5–9 speakers against 9.13 for 1–4.
+
+**Why bench it:** our pyannote-segmentation + CAM++ pipeline (`diarize.py`)
+split 3 real voices into 7 on the 21-minute fixture until `SpeakerLinker`
+merged near-duplicates (NOTES-PLAN.md). A model trained end to end on meeting
+audio may not over-split in the first place. **Unknowns:** CPU speed (NVIDIA
+lists only GPUs) and the cost of shipping a second native runtime beside
+sherpa-onnx. **Test:** the 21-minute fixture with ground-truth speakers —
+speaker count, purity and wall-clock against the current pipeline, same laptop.
+
+### 3c. Parakeet TDT 0.6B v3 — 🟡 Queued for English-only meetings
+
+Not a Filipino option, but for a meeting the person marks **English** it beats
+Whisper on both axes: Open ASR mean WER **6.32** vs Whisper large-v3 **7.44**,
+RTFx **3,332.74** vs **145.51** on GPU **[PAPER]**. On CPU, one community ONNX
+Runtime project reports int8 at ~17× real time on an i7-4790 and ~30× on an
+i7-12700KF **[VENDOR]**. A community model card links an official
+`sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` archive, so it would be a new `en`
+route in the runtime we already ship (§10), not a new dependency — confirm on
+the sherpa-onnx releases page. **Never for `auto`:** it cannot write Tagalog,
+so a Taglish meeting would be mangled. Bench: English fixtures, WER and
+wall-clock against turbo.
+
+### 3d. Context terms — 🟢 Built 2026-11-23 (engine + Weave's Rust app), not released
+
+Earlier passes said to borrow NVIDIA's KenLM / N-gram LM fusion for biasing
+decoding toward known terms. Nemotron's own figures show what biasing is worth
+on hard audio — Earnings22 12.54 → 9.58, ContextASR-Bench 3.33 → 1.71
+**[VENDOR]**. Both our engines already accepted a bias, and nothing fed them.
+
+**What was built.** `POST /jobs` (and `/process`, `/transcribe`) takes an
+optional `context` JSON field, `{title, names, terms}`, advertised as `/health`
+feature `context` (an older engine ignores the field). `meeting_notes/context.py`
+cleans and caps it and builds a ≤300-character hint, title then names then
+terms. Weave's Rust app (`weave-app/src/notes_context.rs`) sends the
+recording's title and, when the chat list leads back to exactly one
+conversation by that title with ≤12 members, those members' names. **Nothing
+is stored for it**, because a list of who was in which call would be a call
+log. Names stay in the job's memory, are never logged, never saved and never
+echoed back.
+
+**Why `hotwords`, not `initial_prompt` [SOURCE].** faster-whisper 1.2.1's
+`get_prompt` puts `hotwords` in front of every 30-second window, while
+`initial_prompt` only seeds the "previous text", which slides out after ~223
+tokens (about the first minute).
+
+**Measured on the `Recordings/` fixtures [MEASURED]** (`large-v3-turbo`, CPU,
+hint "Acumatica ERP rollout. Marielle Dizon, Alyssa Ramos, Paolo Garcia." —
+surnames invented, as Weave would send real ones):
+
+| | No hint | Hint alone | Hint + speech filter (shipped) |
+|---|---|---|---|
+| Product name | "Akamatica ERP" / "Akumatika ARP" | "Acumatica ERP" in all three | same |
+| Second person | "Elisha" (English) / "Alicia" (Taglish) | "Alyssa" in every mention | same |
+| Taglish, after the last word | nothing | **invented** "Thank you." and "Thank you very much.", timed 68.6–87.6 s of a **69.2 s** file | nothing |
+| Segments | sentence-sized | fewer, longer | fewer, longer → cut at sentence ends |
+
+Three rules came out of that, all in `backends/whisper.py`:
+
+1. **The hint only goes in with faster-whisper's speech filter on**
+   (`vad_filter=True`), which keeps silence away from the decoder. If the
+   filter's model cannot load, the hint is left out: the engine behaves
+   exactly as before hints existed. `no_speech_prob` was 0.00 on the invented
+   lines, so it cannot be used to catch them. **The engine built 2026-10-13
+   did not contain the filter's model** (`faster_whisper/assets/silero_vad_v6.onnx`,
+   package data no PyInstaller hook collects); `scripts/build_sidecar.py` now
+   collects `faster_whisper`. Until the engine is rebuilt and republished,
+   every hint is dropped by that rule.
+2. **Hinted segments are cut at sentence ends** using word times
+   (`word_timestamps=True`, `split_at_sentences`). The speaker step labels
+   WHOLE segments, and the longer hinted segments joined one person's reply to
+   the next turn (Bisaya: "Ready na ni unya. Perfecto. …"). Word times cost
+   about +10% decode time (39.7 s → 43.6 s on the 70 s Bisaya fixture, warm; a
+   second pair was disturbed by other work on the PC).
+3. **A segment that is only the hint read back** (a run of ≥6 of its words) is
+   dropped whole, before cutting, and **any segment timed after the audio
+   ends** is dropped, hint or not.
+
+**End to end with the speaker step [MEASURED]** (the engine's own backend and
+`assign_speakers`, Bisaya and Taglish fixtures, with and without the hint):
+3 speakers found every time, and **every turn got the same speaker with the
+hint as without it**, including the short replies at a turn change ("Marady na
+ni Onya.", "Ready na yun mamaya." stay with the person who said them). The
+hint also fixed "Mariel" → "Marielle" in the Bisaya file. Nothing was invented
+after the last word. Transcription times moved both ways (55.6 → 38.0 s,
+44.8 → 64.1 s) while other work shared the PC, so they say nothing about
+speed.
+
+**Not covered:** the Tagalog engine's hotwords (they need its transducer
+export and write a file beside the shared model, which would leave names on
+disk) and Omnilingual (CTC, no biasing). Both get the hint only when they fall
+back to Whisper. A per-person glossary has an engine field (`terms`) but no
+Weave setting yet.
+
+### Sources for §3 (checked 2026-11-23)
+
+- Model card: `https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B` (language matrix, benchmarks, hardware, licence)
+- NVIDIA blog: `https://huggingface.co/blog/nvidia/nemotron-transcribe-granary` (Granary v2, throughput, fine-tuning case study)
+- GGUF quants: `https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF`
+- Runtime: `https://github.com/NVIDIA/NeMo-Speech.cpp`
+- Diarizer: `https://huggingface.co/nvidia/Nemotron-3-Diarization`
+- Streaming 0.6B: `https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-ASR-Streaming-Multilingual-0.6b`
+- Open ASR averages: arXiv 2510.06961 (Table 3)
+- Parakeet CPU figures: `https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai`
 
 ---
 
@@ -120,6 +315,13 @@ biasing decoding toward drug names. That idea generalises to every engine.
 
 Tagalog: ~78–85% accuracy on clean formal audio, 70–80% casual, worse on
 Taglish. **[VENDOR]** No reliable published Tagalog WER.
+
+English: Open ASR leaderboard mean WER **7.44** for large-v3 **[PAPER]**
+(arXiv 2510.06961); turbo **7.83** in a May 2026 snapshot **[STALE-RISK]**.
+For scale, Parakeet v3 is 6.32 and Nemotron 3.5 Transcribe claims 4.71 (§3).
+
+**Unused today:** the backend accepts an `initial_prompt` (decoder context for
+names and jargon), but the router never passes one — §3d.
 
 **Runtime:** `faster-whisper` (CTranslate2) — same weights, ~4× faster on CPU
 at int8, ~4 GB vs ~10 GB memory. This is what makes turbo viable and keeps
@@ -293,6 +495,7 @@ All 🔵 **[VENDOR]**, none benchmarked on Taglish by anyone:
 | Gladia Solaria-1 | 100+ languages incl. Tagalog, native code-switching |
 | ElevenLabs Scribe | 3.1% WER on FLEURS Filipino |
 | Speechmatics | 96% word accuracy, Tagalog |
+| Nemotron 3.5 Transcribe on Baseten / DeepInfra / Simplismart (Nov 2026) | Open weights, hosted; the model is §3a |
 
 **Parked because:** for patient audio, RA 10173 + NPC/DOH rules make cloud a
 compliance project (data residency, processor agreements, NPC registration,
@@ -629,6 +832,7 @@ Omnilingual CTC. That is a strong argument for recording our own 5–10 h early.
 | PyInstaller | 🟢 In use | 222 MB bundle. ⚠️ Runs the real program as a *child of a bootloader* — see §12. |
 | fairseq2 (Omnilingual) | 🔵 Watch | Windows supported per docs, but Python ≤3.12 |
 | ONNX Runtime | 🟢 Indirect | CPU EP reportedly 4× faster than WebGPU for Qwen3-ASR-0.6B |
+| **NeMo-Speech.cpp** (NVIDIA, Apache-2.0, ggml) | 🔵 Watch | NVIDIA's local runtime for its speech models: Nemotron 3 Diarization, Nemotron 3.5 Transcribe, Parakeet, the streaming ASR models, Silero VAD. CPU / CUDA / Metal / Vulkan backends; prebuilt Windows archives (the install script checks SHA-256); `nemo-speech serve` gives an OpenAI-compatible HTTP API; ships C headers and shared libraries. Only CPU figure published: the English Nemotron Speech Streaming 0.6B at Q8_0, 6× real time **[VENDOR]**. The way to run §3b if it wins the bench — at the cost of a second native runtime beside sherpa-onnx. |
 
 **[PAPER]** On-device streaming benchmark (arXiv 2604.14493), CPU-only,
 English: Nemotron-0.6B int4 = 7.28% WER, 2.46× realtime, <1 GB.
@@ -683,7 +887,11 @@ Things that cost time and would cost it again. **[MEASURED]** unless noted.
 | Qwen3-ASR | ⚪ **Parked** | Too slow (1.7B) or too weak (0.6B) |
 | Cloud APIs | ⚪ **Parked** | Compliance cost; keep as benchmark baseline only |
 | Common Voice | 🔴 **Ruled out** | No Philippine locale exists, scripted or spontaneous (June 2026) |
-| NVIDIA NeMo family | 🔴 **Ruled out** | No Filipino in any model, in any tier |
+| **Context terms** (title, names → Whisper `hotwords`) | 🟢 **Built**, not released | Fixed the product name and a person's name on all three fixtures; only with the speech filter (a hint alone invented lines over silence); needs the engine rebuilt (§3d) |
+| **Nemotron 3 Diarization** | 🟡 **Queued** | Half the DER of its predecessor on meeting sets; bench against `diarize.py` on CPU before adopting (§3b) |
+| **Parakeet TDT 0.6B v3** | 🟡 **Queued** | `en` route only: better WER than Whisper and far faster, in sherpa-onnx already; never `auto` (§3c) |
+| **Nemotron 3.5 Transcribe 30B-A4B** | ⚪ **Parked** on-device · 🔵 **Watch** for a server | Best open English-meeting model, speakers built in; 15–37 GB, no CPU figures, FLEURS Filipino 18.28 vs NCSpeech 9.34, no Cebuano (§3a) |
+| NVIDIA small models (streaming 0.6B, Canary) | 🔴 **Ruled out** for Filipino | Still no Tagalog in any tier (re-checked 2026-11-23) |
 
 ---
 
@@ -704,6 +912,16 @@ Unanswered, in priority order:
    low-resource ("L") in the paper, still no published result.
 6. **Will UP-DSP license PLD-derived models for commercial use?** Paper says
    research pledge + CC-BY-NC; nothing published about commercial terms.
+7. **Do context terms help on a real meeting?** The fixtures (§3d) say yes for
+   names and product terms, with the speech filter on. Still unmeasured: a
+   long call, a hint with a dozen names, and whether the filter drops quiet
+   speech that the unfiltered decode kept.
+8. **Does Nemotron 3 Diarization beat `diarize.py` on a laptop CPU?** Speaker
+   count, purity and wall-clock on the 21-minute fixture (§3b).
+9. **Does Nemotron 3.5 Transcribe handle our Taglish and Bisaya–English
+   fixtures?** The card claims Tagalog code-switching. One rented-GPU run
+   answers it, and decides whether a company GPU server is worth discussing
+   (§3a).
 
 *Answered since 2026-07-30:* "Can Omnilingual run on CPU?" — yes, via
 sherpa-onnx (§6a). "Is PLD downloadable?" — yes, `sapinsapin/pld` (§9b). "Is MMS
@@ -716,7 +934,14 @@ good enough?" — moot; Omnilingual CTC replaces it as the regional option.
 Things move fast here. To refresh, ask for an update on:
 
 **Engines**
-- "Has NVIDIA added Filipino/Tagalog to any NeMo ASR model?" — was a hard no
+- "Has NVIDIA added Filipino/Tagalog to any NeMo ASR model?" — a hard no until
+  2026-10-28; now only Nemotron 3.5 Transcribe 30B-A4B ("Supported" tier).
+  Ask instead: "Is there a smaller Nemotron Transcribe, or a 0.6B model with
+  Tagalog?"
+- "Has anyone published CPU speed and RAM for the Nemotron 3.5 Transcribe
+  GGUF quants?"
+- "Does Nemotron 3 Diarization have an ONNX / sherpa-onnx export, or CPU
+  timings in NeMo-Speech.cpp?"
 - "New Omnilingual ASR releases — smaller models, ONNX export, or CPU
   benchmarks?"
 - "Is there a Qwen3-ASR successor with better Filipino, or Windows support in
@@ -746,6 +971,9 @@ Things move fast here. To refresh, ask for an update on:
 - `https://huggingface.co/api/models/facebook/mms-1b-all` (adapter list)
 - HuggingFace Open ASR Leaderboard
 - `pypi.org/pypi/omnilingual-asr/json` (version constraints)
+- `https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B` (language matrix: check the Tagalog row's tier and ticks)
+- `https://github.com/NVIDIA/NeMo-Speech.cpp` (supported models, backends, release archives)
+- `https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF` (quant sizes; any CPU figures)
 
 ⚠️ When re-checking, **re-verify from source, not from blog posts.** Every
 significant correction in this document came from reading a repo file or an API

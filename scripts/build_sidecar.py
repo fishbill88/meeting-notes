@@ -47,6 +47,10 @@ HIDDEN_IMPORTS = [
 #: build machine and dies on a clean one. Speaker diarization needs it.
 COLLECT_ALL = [
     "sherpa_onnx",
+    # Its speech filter's model (assets/silero_vad_v6.onnx, ~2 MB) is package DATA, which no PyInstaller hook
+    # collects: the 2026-10-13 build had none. Whisper is given the host's context hint only with that filter on
+    # (backends/whisper.py), so without this file every hint is silently dropped.
+    "faster_whisper",
 ]
 
 #: Kept out of the bundle. torch is the big one — see the module docstring.

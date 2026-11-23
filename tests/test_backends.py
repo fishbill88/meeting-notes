@@ -92,6 +92,167 @@ def test_whisper_backend_forwards_language_and_prompt(fake_faster_whisper, wav_f
     assert kwargs["initial_prompt"] == "lagnat, ubo"
 
 
+@pytest.fixture
+def vad_ready(monkeypatch):
+    """faster-whisper's speech filter loads (the fake module has none of its own)."""
+    monkeypatch.setattr(FasterWhisperBackend, "_vad_ready", lambda self: True)
+
+
+def test_whisper_backend_sends_no_hotwords_unless_given(fake_faster_whisper, wav_file, vad_ready):
+    FasterWhisperBackend(model_size="base").transcribe_file(wav_file)
+    kwargs = fake_faster_whisper._model.transcribe.call_args[1]
+    assert "hotwords" not in kwargs and "vad_filter" not in kwargs   # unchanged for a job with no context
+
+
+def test_whisper_backend_forwards_hotwords_with_the_speech_filter_on(fake_faster_whisper, wav_file, vad_ready):
+    backend = FasterWhisperBackend(model_size="base", hotwords="Sprint sync. Ana Cruz.")
+    backend.transcribe_file(wav_file)
+    kwargs = fake_faster_whisper._model.transcribe.call_args[1]
+    assert kwargs["hotwords"] == "Sprint sync. Ana Cruz."
+    assert kwargs["vad_filter"] is True
+    assert kwargs["word_timestamps"] is True   # so segments can be cut at sentence ends
+
+
+def test_whisper_backend_leaves_the_hint_out_when_the_speech_filter_cannot_load(fake_faster_whisper, wav_file):
+    # The fake faster_whisper has no `vad` module, which is how a missing filter model looks to the backend too.
+    backend = FasterWhisperBackend(model_size="base", hotwords="Sprint sync. Ana Cruz.")
+    backend.transcribe_file(wav_file)
+    kwargs = fake_faster_whisper._model.transcribe.call_args[1]
+    assert "hotwords" not in kwargs and "vad_filter" not in kwargs
+    backend.transcribe_file(wav_file)
+    assert backend._vad_ok is False   # asked once
+
+
+def test_whisper_backend_drops_text_timed_after_the_audio_ends(monkeypatch, wav_file):
+    from tests.conftest import _segment, make_fake_faster_whisper
+
+    module = make_fake_faster_whisper(segments=[
+        _segment(0.0, 60.0, " Let's give the stakeholders the green light.", -0.1),
+        _segment(70.6, 87.6, " Thank you very much.", -1.27),   # measured: a 69.2 s file
+    ])
+    _, info = module._model.transcribe.return_value
+    info.duration = 69.2
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    result = FasterWhisperBackend(model_size="base").transcribe_file(wav_file)
+    assert [s.text for s in result.segments] == [" Let's give the stakeholders the green light."]
+
+
+def test_whisper_backend_drops_a_segment_that_reads_the_hotwords_back(monkeypatch, wav_file, vad_ready):
+    from tests.conftest import _segment, make_fake_faster_whisper
+
+    hint = "Sprint sync. Ana Cruz, Marco Reyes, Joy Santos."
+    module = make_fake_faster_whisper(segments=[
+        _segment(0.0, 2.0, " Good morning.", -0.1),
+        _segment(2.0, 30.0, " Sprint sync. Ana Cruz, Marco Reyes, Joy Santos.", -0.3),
+        _segment(30.0, 32.0, " Ana, the build is ready.", -0.1),
+    ])
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    result = FasterWhisperBackend(model_size="base", hotwords=hint).transcribe_file(wav_file)
+
+    assert [s.text for s in result.segments] == [" Good morning.", " Ana, the build is ready."]
+    assert result.text == "Good morning. Ana, the build is ready."
+
+
+def test_whisper_backend_keeps_everything_without_hotwords(monkeypatch, wav_file):
+    from tests.conftest import _segment, make_fake_faster_whisper
+
+    echo_like = " Sprint sync. Ana Cruz, Marco Reyes, Joy Santos."
+    module = make_fake_faster_whisper(segments=[_segment(0.0, 2.0, echo_like, -0.1)])
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    result = FasterWhisperBackend(model_size="base").transcribe_file(wav_file)
+    assert [s.text for s in result.segments] == [echo_like]
+
+
+# ---------------------------------------------------------------------------
+# Cutting hinted segments at sentence ends
+# ---------------------------------------------------------------------------
+
+
+def _worded(start, end, *words):
+    """A decoded segment with word times: words are (text, start, end), text with its leading space."""
+    from types import SimpleNamespace
+
+    ws = [SimpleNamespace(word=t, start=s, end=e) for t, s, e in words]
+    return SimpleNamespace(start=start, end=end, text="".join(w.word for w in ws), words=ws, avg_logprob=-0.1)
+
+
+# The Bisaya fixture's 58.8-63.8 s segment, which joined Marielle's reply to the host's next turn.
+TURNS = _worded(
+    58.8, 63.8,
+    (" Ready", 58.8, 59.2), (" na", 59.2, 59.4), (" ni", 59.4, 59.6), (" unya.", 59.6, 60.4),
+    (" Perfecto.", 61.1, 61.8), (" Mag-final", 61.9, 62.5), (" dry", 62.5, 62.8), (" run.", 62.8, 63.8),
+)
+
+
+def test_a_segment_is_cut_at_each_sentence_end_by_its_word_times():
+    from meeting_notes.backends.whisper import split_at_sentences
+
+    assert split_at_sentences(TURNS) == [
+        (58.8, 60.4, " Ready na ni unya."),
+        (61.1, 61.8, " Perfecto."),
+        (61.9, 63.8, " Mag-final dry run."),
+    ]
+
+
+def test_one_sentence_or_no_word_times_is_left_whole():
+    from types import SimpleNamespace
+
+    from meeting_notes.backends.whisper import split_at_sentences
+
+    one = _worded(0.0, 2.0, (" Good", 0.0, 0.5), (" morning.", 0.5, 2.0))
+    assert split_at_sentences(one) == [(0.0, 2.0, " Good morning.")]
+    bare = SimpleNamespace(start=0.0, end=3.0, text=" One. Two.", words=None)
+    assert split_at_sentences(bare) == [(0.0, 3.0, " One. Two.")]
+
+
+def test_a_closing_quote_and_cjk_punctuation_still_end_a_sentence():
+    from meeting_notes.backends.whisper import split_at_sentences
+
+    quoted = _worded(0.0, 3.0, (' "Ready."', 0.0, 1.0), (" Yes", 1.5, 2.0), (" po.", 2.0, 3.0))
+    assert [p[2] for p in split_at_sentences(quoted)] == [' "Ready."', " Yes po."]
+    cjk = _worded(0.0, 2.0, ("好的。", 0.0, 1.0), ("谢谢", 1.0, 2.0))
+    assert [p[2] for p in split_at_sentences(cjk)] == ["好的。", "谢谢"]
+
+
+def test_a_hinted_transcript_comes_back_one_sentence_per_segment(monkeypatch, wav_file, vad_ready):
+    from tests.conftest import make_fake_faster_whisper
+
+    module = make_fake_faster_whisper(segments=[TURNS])
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    result = FasterWhisperBackend(model_size="base", hotwords="Sprint sync. Ana Cruz.").transcribe_file(wav_file)
+    assert [(s.start, s.end, s.text) for s in result.segments] == [
+        (58.8, 60.4, " Ready na ni unya."),
+        (61.1, 61.8, " Perfecto."),
+        (61.9, 63.8, " Mag-final dry run."),
+    ]
+    assert result.text == "Ready na ni unya. Perfecto. Mag-final dry run."
+
+
+def test_an_echo_is_dropped_whole_before_any_cutting(monkeypatch, wav_file, vad_ready):
+    from tests.conftest import make_fake_faster_whisper
+
+    hint = "Sprint sync. Ana Cruz, Marco Reyes, Joy Santos."
+    echo = _worded(
+        0.0, 8.0,
+        (" Sprint", 0.0, 0.5), (" sync.", 0.5, 1.0), (" Ana", 1.5, 2.0), (" Cruz,", 2.0, 2.5),
+        (" Marco", 3.0, 3.5), (" Reyes,", 3.5, 4.0), (" Joy", 4.5, 5.0), (" Santos.", 5.0, 8.0),
+    )
+    module = make_fake_faster_whisper(segments=[echo])
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+
+    # Cut first, "Sprint sync." alone would be too short to count as an echo and would survive.
+    assert FasterWhisperBackend(model_size="base", hotwords=hint).transcribe_file(wav_file).segments == []
+
+
+def test_an_unhinted_transcript_is_neither_worded_nor_cut(fake_faster_whisper, wav_file):
+    FasterWhisperBackend(model_size="base").transcribe_file(wav_file)
+    assert "word_timestamps" not in fake_faster_whisper._model.transcribe.call_args[1]
+
+
 def test_whisper_backend_unavailable_without_package(monkeypatch, wav_file):
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
     backend = FasterWhisperBackend(model_size="base")

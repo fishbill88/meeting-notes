@@ -35,7 +35,7 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 #: Backend names accepted by ``AppConfig.backend`` and ``--backend``.
-BACKEND_NAMES = ("faster-whisper", "nemo-tagalog", "omnilingual-ctc")
+BACKEND_NAMES = ("faster-whisper", "nemo-tagalog", "omnilingual-ctc", "wav2vec2-ctc")
 
 #: Language modes Whisper cannot be told about. faster-whisper rejects codes
 #: outside its 99-token vocabulary, so a fallback decode uses the nearest
@@ -106,6 +106,13 @@ def _build_named(name: str, config: AppConfig) -> "TranscriptionBackend":
         return _build_tagalog(config, allow_fallback=False)
     if name == "omnilingual-ctc":
         return _build_omnilingual(config, allow_fallback=False)
+    if name == "wav2vec2-ctc":
+        # Benchmark-only (never reached by language routing). A repo id after the colon in a bench spec
+        # (`wav2vec2-ctc:org/model`) arrives as ``whisper_model``; anything else means "use the default".
+        from meeting_notes.backends.wav2vec2 import Wav2Vec2CtcBackend  # noqa: PLC0415
+
+        model = config.whisper_model if "/" in (config.whisper_model or "") else None
+        return Wav2Vec2CtcBackend(model=model, language=config.resolved_language or "ceb")
     raise ValueError(
         f"Unknown backend '{name}'. Choose from: {', '.join(BACKEND_NAMES)}"
     )
@@ -118,11 +125,16 @@ def _build_whisper(config: AppConfig) -> "TranscriptionBackend":
     if language in WHISPER_LANGUAGE_ALIASES:
         language = WHISPER_LANGUAGE_ALIASES[language]
 
+    from meeting_notes.context import hint_text  # noqa: PLC0415
+
     return FasterWhisperBackend(
         model_size=config.whisper_model,
         language=language,
         device=config.device,
         compute_type=config.compute_type,
+        # The host's title and names. Whisper only: the Tagalog engine's hotwords need a transducer export and would
+        # write the names to a file beside the model (see meeting_notes.context). Its Whisper fallback gets them.
+        hotwords=hint_text(config.context),
     )
 
 

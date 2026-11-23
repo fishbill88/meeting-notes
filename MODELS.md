@@ -77,12 +77,23 @@ margin, from any model we found.
 | Qwen3-ASR-0.6B | 36.10 **CER** | 0.6B | ~2.5× realtime | Apache-2.0 |
 | Whisper large-v3 | not reported | 1.55B | ~0.4× realtime | MIT |
 | Whisper large-v3-turbo | not reported | 809M | ~7× faster than v3 | MIT |
+| Nemotron 3.5 Transcribe 30B-A4B (Oct 2026) | 18.28% **WER** | 34B (4.3B active) | Not viable: 15–37 GB, no published CPU figures | OpenMDW-1.1 |
 
 ⚠️ These are **vendor/paper-reported and not directly comparable**: Qwen reports
 CER, NCSpeech reports WER. CER is normally the more forgiving metric, so Qwen's
 Filipino numbers are further behind 9.34% WER than the table makes them look.
-NVIDIA's own models (Parakeet, Canary, Nemotron) are excluded because none of
-them support Filipino in any tier.
+Nemotron 3.5 Transcribe is the first NVIDIA model with Tagalog, in its lowest
+tier and with no Cebuano. Its small models (Parakeet, Canary, the 0.6B
+streaming Nemotron) still have no Filipino. See RESEARCH.md §3.
+
+**Context hint (2026-11-23).** A host may send the meeting's title, its
+people's names and terms (`POST /jobs` `context`); Whisper gets them as
+`hotwords`, so names and product terms come out spelled right. Whisper only,
+and only with faster-whisper's speech filter on: a hint without it made
+Whisper invent lines over silence. Hinted segments are cut at sentence ends
+so the speaker step can label each turn. **The packaged engine must be
+rebuilt** (`scripts/build_sidecar.py` now ships the filter's model); until
+then the hint is silently left out. Details and measurements: RESEARCH.md §3d.
 
 ## Measured results
 
@@ -212,7 +223,9 @@ Auto-downloaded on first use (~34 MB total):
 Desktop (`diarize.py`) uses the same two models plus a GTCRN denoise pre-pass
 (`gtcrn_simple.onnx`, ~0.5 MB) that strips background beds before embedding —
 raises purity from 94% to 97.5% on the benchmark fixture. Not on mobile yet
-(needs a native module addition + dev-client rebuild).
+(needs a native module addition + dev-client rebuild). A possible desktop
+replacement, NVIDIA's Nemotron 3 Diarization (~100M, up to 8 speakers), is
+queued for a CPU bench against it (RESEARCH.md §3b).
 
 Both rehosted ungated by the sherpa-onnx project. Language-agnostic (fine for Taglish).
 Fallback chain when unavailable: VAD-refined pause turns + pitch clustering → pause

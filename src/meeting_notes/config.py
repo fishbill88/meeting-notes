@@ -8,6 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from meeting_notes.context import TranscriptionContext
+
 
 # Whisper model sizes, as understood by faster-whisper (CTranslate2).
 #
@@ -151,6 +153,9 @@ class AppConfig:
     #: Safe to leave on: silently skipped when the engine or its models are
     #: unavailable — see meeting_notes.diarize.
     diarize: bool = True
+    #: The meeting's title, its people and the team's words, from the host (``POST /jobs`` ``context``). Steers
+    #: Whisper's spelling; see meeting_notes.context. Personal data: memory only, never saved or logged.
+    context: Optional[TranscriptionContext] = None
 
     # Summarizer
     use_ollama: bool = True

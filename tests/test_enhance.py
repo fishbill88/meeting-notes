@@ -292,7 +292,7 @@ def _wait(client, job_id, timeout=10.0):
 def test_health_advertises_the_features_without_changing_the_api_number(client):
     body = client.get("/health").json()
     assert body["api"] == 1
-    assert {"notepad", "enhance"} <= set(body["features"])
+    assert {"notepad", "enhance", "context"} <= set(body["features"])
 
 
 def test_the_notepad_routes_need_the_token(client):

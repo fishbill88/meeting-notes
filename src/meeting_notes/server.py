@@ -47,8 +47,10 @@ TOKEN_ENV = "MEETING_NOTES_TOKEN"
 API_VERSION = 1
 
 #: Routes added without changing the wire contract above. ``notepad``: ``/notepads/*``; ``enhance``:
-#: ``POST /jobs/enhance`` and the ``my_notes`` / ``enhanced`` fields of a saved meeting.
-FEATURES = ["notepad", "enhance"]
+#: ``POST /jobs/enhance`` and the ``my_notes`` / ``enhanced`` fields of a saved meeting; ``context``: the optional
+#: ``context`` form field on ``/jobs``, ``/process`` and ``/transcribe`` (meeting_notes.context). An engine without
+#: it ignores the field, so a host may always send it; the feature says whether it is USED.
+FEATURES = ["notepad", "enhance", "context"]
 
 #: Optional passphrase for the consultation store. Unset means key-file mode —
 #: see the threat model in ``meeting_notes.crypto``.
@@ -64,7 +66,7 @@ ALLOWED_ORIGINS = (
     "http://127.0.0.1:1420",
 )
 
-app = FastAPI(title="Meeting Notes AI", version="0.1.0")
+app = FastAPI(title="Meeting Notes AI", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -263,6 +265,7 @@ async def transcribe(
     model: str = Form(DEFAULT_WHISPER_MODEL),
     backend: Optional[str] = Form(None),
     diarize: str = Form("true"),
+    context: Optional[str] = Form(None),
 ):
     """Transcribe an uploaded audio file, routing by language mode."""
     from meeting_notes.backends.router import resolve_backend
@@ -272,6 +275,7 @@ async def transcribe(
         model=model,
         backend=backend,
         diarize=_form_bool(diarize),
+        context=context,
     )
     tmp_path = await _save_upload(file)
 
@@ -328,6 +332,7 @@ async def process(
     ollama_url: str = Form("http://localhost:11434"),
     ollama_model: str = Form("llama3"),
     diarize: str = Form("true"),
+    context: Optional[str] = Form(None),
 ):
     """Transcribe an audio file and generate meeting notes in one call."""
     config = _build_config(
@@ -339,6 +344,7 @@ async def process(
         ollama_url=ollama_url,
         ollama_model=ollama_model,
         diarize=_form_bool(diarize),
+        context=context,
     )
     tmp_path = await _save_upload(file)
 
@@ -631,8 +637,13 @@ async def create_job(
     ollama_url: str = Form("http://localhost:11434"),
     ollama_model: str = Form("llama3"),
     diarize: str = Form("true"),
+    context: Optional[str] = Form(None),
 ):
-    """Queue a recording to be turned into saved notes. Returns the job at once."""
+    """Queue a recording to be turned into saved notes. Returns the job at once.
+
+    ``context`` is optional JSON, ``{"title", "names", "terms"}``: what the host knows about the meeting, used to
+    steer Whisper's spelling (meeting_notes.context). Held in the job's memory only.
+    """
     import uuid  # noqa: PLC0415
 
     from meeting_notes.jobs import Job  # noqa: PLC0415
@@ -646,6 +657,7 @@ async def create_job(
         ollama_url=ollama_url,
         ollama_model=ollama_model,
         diarize=_form_bool(diarize),
+        context=context,
     )
 
     jobs_dir = _jobs_dir()
@@ -863,8 +875,15 @@ def _build_config(
     ollama_url: str = "http://localhost:11434",
     ollama_model: str = "llama3",
     diarize: bool = True,
+    context: Optional[str] = None,
 ) -> AppConfig:
     """Build and validate config, turning bad input into a 400."""
+    from meeting_notes.context import parse_context  # noqa: PLC0415
+
+    try:
+        parsed_context = parse_context(context)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     config = AppConfig(
         whisper_model=model,
         language_mode=LanguageMode.from_value(language),
@@ -874,6 +893,7 @@ def _build_config(
         ollama_url=ollama_url,
         ollama_model=ollama_model,
         diarize=diarize,
+        context=parsed_context,
     )
     try:
         config.validate()

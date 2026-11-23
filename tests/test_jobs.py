@@ -400,6 +400,46 @@ def test_bad_settings_are_refused_up_front(client):
     assert client.get("/jobs", headers=AUTH).json()["jobs"] == []   # nothing was queued
 
 
+def test_the_hosts_context_reaches_the_pipeline_and_is_never_shown(client, monkeypatch):
+    import json
+
+    seen = {}
+
+    def fake_pipeline(path, config, on_progress=None, **kw):
+        seen["context"] = config.context
+        return _fake_result()
+
+    monkeypatch.setattr(server_module, "run_pipeline", fake_pipeline)
+    context = {"title": "Sprint sync", "names": ["Ana Cruz", "Marco Reyes"], "terms": ["UAT"]}
+    job = _post_job(client, context=json.dumps(context)).json()
+    done = _wait_state(client, job["id"], {"done", "failed"})
+
+    assert done["state"] == "done", done
+    assert seen["context"].names == ("Ana Cruz", "Marco Reyes")
+    assert seen["context"].title == "Sprint sync"
+    for shown in (job, done, *client.get("/jobs", headers=AUTH).json()["jobs"]):
+        assert "Ana Cruz" not in json.dumps(shown)   # names are the meeting's people: never echoed
+
+
+def test_a_job_without_context_has_none(client, monkeypatch):
+    seen = {}
+
+    def fake_pipeline(path, config, on_progress=None, **kw):
+        seen["context"] = config.context
+        return _fake_result()
+
+    monkeypatch.setattr(server_module, "run_pipeline", fake_pipeline)
+    _wait_state(client, _post_job(client).json()["id"], {"done"})
+    assert seen["context"] is None
+
+
+def test_a_malformed_context_is_refused_up_front(client):
+    response = _post_job(client, context="names: Ana")
+    assert response.status_code == 400
+    assert "JSON object" in response.json()["detail"]
+    assert client.get("/jobs", headers=AUTH).json()["jobs"] == []
+
+
 def test_unknown_job_is_404(client):
     assert client.get("/jobs/nope", headers=AUTH).status_code == 404
     assert client.delete("/jobs/nope", headers=AUTH).status_code == 404

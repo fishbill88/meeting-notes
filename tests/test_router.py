@@ -38,6 +38,20 @@ def test_auto_leaves_language_unset_for_detection():
     assert resolve_backend(config).language is None
 
 
+def test_whisper_gets_no_hotwords_without_context():
+    assert resolve_backend(AppConfig(language_mode=LanguageMode.AUTO)).hotwords is None
+
+
+def test_the_hosts_context_reaches_whisper_as_hotwords():
+    from meeting_notes.context import TranscriptionContext
+
+    config = AppConfig(
+        language_mode=LanguageMode.ENGLISH,
+        context=TranscriptionContext(title="Sprint sync", names=("Ana Cruz", "Marco Reyes")),
+    )
+    assert resolve_backend(config).hotwords == "Sprint sync. Ana Cruz, Marco Reyes."
+
+
 def test_tagalog_routes_to_nemo_when_available(monkeypatch):
     monkeypatch.setattr(
         "meeting_notes.backends.nemo.NemoTagalogBackend.is_available",
@@ -172,3 +186,38 @@ def test_taglish_routing_raises_not_implemented():
 def test_merge_taglish_raises_not_implemented():
     with pytest.raises(NotImplementedError):
         merge_taglish(None, None)
+
+
+def test_the_wav2vec2_benchmark_engine_is_selectable_but_never_routed_to():
+    from meeting_notes.backends.router import _build_named
+
+    config = AppConfig(language_mode=LanguageMode.CEBUANO)
+    assert resolve_backend(config).name != "wav2vec2-ctc"
+    backend = _build_named("wav2vec2-ctc", AppConfig(language_mode=LanguageMode.CEBUANO, whisper_model="org/some-model"))
+    assert backend.name == "wav2vec2-ctc" and backend.model_id == "org/some-model"
+    # A bare bench spec ("wav2vec2-ctc") carries the default Whisper size, which is not a repo id.
+    assert "/" in _build_named("wav2vec2-ctc", config).model_id
+
+
+def test_the_wav2vec2_engine_says_what_is_missing_instead_of_importing_torch_at_build_time(monkeypatch):
+    import builtins
+
+    from meeting_notes.backends.base import BackendUnavailableError
+    from meeting_notes.backends.wav2vec2 import Wav2Vec2CtcBackend
+
+    real = builtins.__import__
+
+    def no_torch(name, *a, **k):
+        if name in ("torch", "transformers"):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_torch)
+    backend = Wav2Vec2CtcBackend()
+    assert backend.is_available() is False
+    try:
+        backend.warmup()
+    except BackendUnavailableError as exc:
+        assert "torch" in str(exc)
+    else:
+        raise AssertionError("should refuse")
